@@ -1,23 +1,23 @@
 // Abhängigkeiten importieren
 const express = require('express');
-const cors = require('cors'); // Für CORS
+const cors = require('cors'); // Für Cross-Origin Resource Sharing
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 3000; // Nutze den Port von Render oder Standard-Port 3000
+const port = process.env.PORT || 3000; // Port-Variable für Render oder lokal
 
 // Middleware aktivieren
-app.use(cors()); // Erlaubt Anfragen von externen Quellen
-app.use(express.json()); // Zum Verarbeiten von JSON-Daten
+app.use(cors()); // Erlaubt externe Anfragen (z. B. von GitHub Pages)
+app.use(express.json()); // Verarbeitet eingehende JSON-Daten
 
-// Pfad zur JSON-Datei, in der Rezepte und Pläne gespeichert werden
+// Pfad zur Datei, in der die Daten gespeichert werden
 const DATA_FILE = path.join(__dirname, 'data.json');
 
 // Funktion zum Lesen der Daten aus der Datei
 function readData() {
     if (!fs.existsSync(DATA_FILE)) {
-        // Falls Datei nicht existiert, erstelle eine mit Standardwerten
+        // Datei erstellen, falls sie nicht existiert
         writeData({ recipes: [], plans: {} });
     }
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
@@ -28,21 +28,37 @@ function writeData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-// Routen
+// API-Endpunkte
 
-// Rezepte abrufen
+// **GET /recipes**: Liefert alle Rezepte
 app.get('/recipes', (req, res) => {
     const data = readData();
     res.json(data.recipes);
 });
 
-// Alle gespeicherten Wochenpläne abrufen
+// **POST /recipes**: Fügt ein neues Rezept hinzu
+app.post('/recipes', (req, res) => {
+    const data = readData();
+    const newRecipe = req.body;
+
+    if (!newRecipe.name || !newRecipe.calories || !newRecipe.mealTypes) {
+        return res.status(400).json({ message: 'Name, Kalorien und Mahlzeittypen sind erforderlich' });
+    }
+
+    // Rezept zur Liste hinzufügen
+    data.recipes.push(newRecipe);
+    writeData(data);
+
+    res.status(201).json({ message: 'Rezept erfolgreich hinzugefügt' });
+});
+
+// **GET /plans**: Liefert alle gespeicherten Wochenpläne
 app.get('/plans', (req, res) => {
     const data = readData();
     res.json(data.plans);
 });
 
-// Einzelnen Wochenplan abrufen
+// **GET /plans/:name**: Liefert einen spezifischen Wochenplan
 app.get('/plans/:name', (req, res) => {
     const data = readData();
     const plan = data.plans[req.params.name];
@@ -53,7 +69,7 @@ app.get('/plans/:name', (req, res) => {
     }
 });
 
-// Neuen Wochenplan speichern
+// **POST /plans**: Speichert einen neuen Wochenplan
 app.post('/plans', (req, res) => {
     const data = readData();
     const { name, plan } = req.body;
@@ -62,9 +78,11 @@ app.post('/plans', (req, res) => {
         return res.status(400).json({ message: 'Name und Plan sind erforderlich' });
     }
 
+    // Plan speichern
     data.plans[name] = plan;
     writeData(data);
-    res.status(201).json({ message: 'Plan gespeichert' });
+
+    res.status(201).json({ message: `Plan "${name}" erfolgreich gespeichert` });
 });
 
 // Server starten
