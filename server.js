@@ -1,7 +1,7 @@
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,15 +31,15 @@ function writeData(data) {
     }
 }
 
-// **Routen**
+// Endpunkte
 
-/** GET /recipes - Alle Rezepte abrufen */
+// Rezepte abrufen
 app.get('/recipes', (req, res) => {
     const data = readData();
     res.json(data.recipes);
 });
 
-/** POST /recipes - Neues Rezept hinzufügen */
+// Rezept hinzufügen
 app.post('/recipes', (req, res) => {
     const data = readData();
     const newRecipe = req.body;
@@ -54,7 +54,7 @@ app.post('/recipes', (req, res) => {
     res.status(201).json({ message: 'Rezept erfolgreich hinzugefügt' });
 });
 
-/** DELETE /recipes/:name - Rezept löschen */
+// Rezept löschen
 app.delete('/recipes/:name', (req, res) => {
     const data = readData();
     const recipeName = req.params.name;
@@ -70,13 +70,13 @@ app.delete('/recipes/:name', (req, res) => {
     res.json({ message: `Rezept "${recipeName}" erfolgreich gelöscht` });
 });
 
-/** GET /plans - Alle Pläne abrufen */
+// Alle Pläne abrufen
 app.get('/plans', (req, res) => {
     const data = readData();
     res.json(data.plans);
 });
 
-/** POST /plans - Neuen Plan speichern */
+// Plan speichern
 app.post('/plans', (req, res) => {
     const data = readData();
     const { name, plan } = req.body;
@@ -91,7 +91,7 @@ app.post('/plans', (req, res) => {
     res.status(201).json({ message: `Plan "${name}" erfolgreich gespeichert` });
 });
 
-/** GET /plans/:name - Spezifischen Plan abrufen */
+// Plan abrufen
 app.get('/plans/:name', (req, res) => {
     const data = readData();
     const plan = data.plans[req.params.name];
@@ -102,7 +102,7 @@ app.get('/plans/:name', (req, res) => {
     }
 });
 
-/** DELETE /plans/:name - Spezifischen Plan löschen */
+// Plan löschen
 app.delete('/plans/:name', (req, res) => {
     const data = readData();
     const planName = req.params.name;
@@ -117,7 +117,7 @@ app.delete('/plans/:name', (req, res) => {
     res.json({ message: `Plan "${planName}" erfolgreich gelöscht` });
 });
 
-// **Server starten**
+// Server starten
 app.listen(PORT, () => {
     console.log(`Server läuft auf http://localhost:${PORT}`);
 });
