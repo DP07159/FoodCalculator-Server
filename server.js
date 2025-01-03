@@ -90,6 +90,30 @@ app.post('/plans', (req, res) => {
         return res.status(400).json({ message: 'Name und Plan sind erforderlich' });
     }
 
+    app.post('/plans', (req, res) => {
+    const data = readData();
+    const { name, plan } = req.body;
+
+    if (!name || !plan) {
+        return res.status(400).json({ message: 'Name und Plan sind erforderlich' });
+    }
+
+    data.plans[name] = plan;
+    writeData(data);
+
+    res.status(201).json({ message: `Plan "${name}" erfolgreich gespeichert` });
+});
+
+    app.get('/plans/:name', (req, res) => {
+    const data = readData();
+    const plan = data.plans[req.params.name];
+    if (plan) {
+        res.json(plan);
+    } else {
+        res.status(404).json({ message: 'Plan nicht gefunden' });
+    }
+});
+
     // Plan speichern
     data.plans[name] = plan;
     writeData(data);
