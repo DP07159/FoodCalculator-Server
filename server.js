@@ -4,8 +4,7 @@ const cors = require('cors');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(__dirname, 'data.json');
+const PORT = process.env.PORT || 3000; // Render verwendet die Umgebungsvariable "PORT"
 
 // Middleware
 app.use(express.json());
@@ -14,7 +13,7 @@ app.use(cors());
 // Daten aus der Datei lesen
 function readData() {
     try {
-        const data = fs.readFileSync(DATA_FILE, 'utf8');
+        const data = fs.readFileSync('data.json', 'utf8');
         return JSON.parse(data);
     } catch (error) {
         console.error('Fehler beim Lesen der Datei:', error);
@@ -25,7 +24,7 @@ function readData() {
 // Daten in die Datei schreiben
 function writeData(data) {
     try {
-        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+        fs.writeFileSync('data.json', JSON.stringify(data, null, 2), 'utf8');
     } catch (error) {
         console.error('Fehler beim Schreiben der Datei:', error);
     }
@@ -119,5 +118,5 @@ app.delete('/plans/:name', (req, res) => {
 
 // Server starten
 app.listen(PORT, () => {
-    console.log(`Server läuft auf http://localhost:${PORT}`);
+    console.log(`Server läuft auf Port ${PORT}`);
 });
