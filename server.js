@@ -70,10 +70,15 @@ app.delete('/recipes/:name', (req, res) => {
     res.status(200).json({ message: `Rezept "${recipeName}" erfolgreich gelöscht` });
 });
 
-// **GET /plans**: Liefert alle gespeicherten Wochenpläne
-app.get('/plans', (req, res) => {
+// **GET /plans/:name**: Liefert einen spezifischen Wochenplan
+app.get('/plans/:name', (req, res) => {
     const data = readData();
-    res.json(data.plans);
+    const plan = data.plans[req.params.name];
+    if (plan) {
+        res.json(plan);
+    } else {
+        res.status(404).json({ message: 'Plan nicht gefunden' });
+    }
 });
 
 // **POST /plans**: Speichert einen neuen Wochenplan
