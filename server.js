@@ -31,15 +31,15 @@ function writeData(data) {
     }
 }
 
-// Endpunkte
+// API-Endpunkte
 
-// Rezepte abrufen
+// Alle Rezepte abrufen
 app.get('/recipes', (req, res) => {
     const data = readData();
     res.json(data.recipes);
 });
 
-// Rezept hinzufügen
+// Neues Rezept hinzufügen
 app.post('/recipes', (req, res) => {
     const data = readData();
     const newRecipe = req.body;
