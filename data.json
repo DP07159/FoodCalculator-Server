@@ -1,13 +1,4 @@
 {
-    "recipes": [
-        { "name": "Pancakes", "calories": 350, "mealTypes": ["Frühstück"] },
-        { "name": "Caesar Salad", "calories": 450, "mealTypes": ["Mittagessen", "Abendessen"] },
-        { "name": "Lasagne", "calories": 600, "mealTypes": ["Mittagessen", "Abendessen"] }
-    ],
-    "plans": {
-        "MeinPlan": {
-            "day0": ["Pancakes", "Caesar Salad", "Lasagne"],
-            "day1": ["Pancakes", "Pancakes", "Caesar Salad"]
-        }
-    }
+    "recipes": [],
+    "plans": {}
 }
