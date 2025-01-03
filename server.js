@@ -1,122 +1,62 @@
-const express = require('express');
-const fs = require('fs');
-const cors = require('cors');
-const path = require('path');
-
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
 const app = express();
-const PORT = process.env.PORT || 3000; // Render verwendet die Umgebungsvariable "PORT"
+const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
-// Daten aus der Datei lesen
-function readData() {
-    try {
-        const data = fs.readFileSync('data.json', 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Fehler beim Lesen der Datei:', error);
-        return { recipes: [], plans: {} };
-    }
-}
+const dbPath = "./db.json";
 
-// Daten in die Datei schreiben
-function writeData(data) {
-    try {
-        fs.writeFileSync('data.json', JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-        console.error('Fehler beim Schreiben der Datei:', error);
-    }
-}
-
-// API-Endpunkte
-
-// Alle Rezepte abrufen
-app.get('/recipes', (req, res) => {
-    const data = readData();
-    res.json(data.recipes);
+// API: Rezepte abrufen
+app.get("/recipes", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
+    res.json(db.recipes);
 });
 
-// Neues Rezept hinzufügen
-app.post('/recipes', (req, res) => {
-    const data = readData();
+// API: Rezept hinzufügen
+app.post("/recipes", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
     const newRecipe = req.body;
-
-    if (!newRecipe.name || !newRecipe.calories || !newRecipe.mealTypes) {
-        return res.status(400).json({ message: 'Name, Kalorien und Mahlzeiten-Typen sind erforderlich' });
-    }
-
-    data.recipes.push(newRecipe);
-    writeData(data);
-
-    res.status(201).json({ message: 'Rezept erfolgreich hinzugefügt' });
+    newRecipe.id = Date.now(); // Eindeutige ID
+    db.recipes.push(newRecipe);
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+    res.status(201).json(newRecipe);
 });
 
-// Rezept löschen
-app.delete('/recipes/:name', (req, res) => {
-    const data = readData();
-    const recipeName = req.params.name;
-
-    const updatedRecipes = data.recipes.filter((recipe) => recipe.name !== recipeName);
-    if (updatedRecipes.length === data.recipes.length) {
-        return res.status(404).json({ message: 'Rezept nicht gefunden' });
-    }
-
-    data.recipes = updatedRecipes;
-    writeData(data);
-
-    res.json({ message: `Rezept "${recipeName}" erfolgreich gelöscht` });
+// API: Rezept löschen
+app.delete("/recipes/:id", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
+    db.recipes = db.recipes.filter((recipe) => recipe.id !== parseInt(req.params.id));
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+    res.status(200).json({ message: "Rezept gelöscht" });
 });
 
-// Alle Pläne abrufen
-app.get('/plans', (req, res) => {
-    const data = readData();
-    res.json(data.plans);
+// API: Wochenpläne abrufen
+app.get("/weekplans", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
+    res.json(db.weekplans);
 });
 
-// Plan speichern
-app.post('/plans', (req, res) => {
-    const data = readData();
-    const { name, plan } = req.body;
-
-    if (!name || !plan) {
-        return res.status(400).json({ message: 'Name und Plan sind erforderlich' });
-    }
-
-    data.plans[name] = plan;
-    writeData(data);
-
-    res.status(201).json({ message: `Plan "${name}" erfolgreich gespeichert` });
+// API: Wochenplan speichern
+app.post("/weekplans", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
+    const newPlan = req.body;
+    newPlan.id = Date.now(); // Eindeutige ID
+    db.weekplans.push(newPlan);
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+    res.status(201).json(newPlan);
 });
 
-// Plan abrufen
-app.get('/plans/:name', (req, res) => {
-    const data = readData();
-    const plan = data.plans[req.params.name];
-    if (plan) {
-        res.json(plan);
-    } else {
-        res.status(404).json({ message: 'Plan nicht gefunden' });
-    }
+// API: Wochenplan löschen
+app.delete("/weekplans/:id", (req, res) => {
+    const db = JSON.parse(fs.readFileSync(dbPath));
+    db.weekplans = db.weekplans.filter((plan) => plan.id !== parseInt(req.params.id));
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+    res.status(200).json({ message: "Wochenplan gelöscht" });
 });
 
-// Plan löschen
-app.delete('/plans/:name', (req, res) => {
-    const data = readData();
-    const planName = req.params.name;
-
-    if (!data.plans[planName]) {
-        return res.status(404).json({ message: 'Plan nicht gefunden' });
-    }
-
-    delete data.plans[planName];
-    writeData(data);
-
-    res.json({ message: `Plan "${planName}" erfolgreich gelöscht` });
-});
-
-// Server starten
 app.listen(PORT, () => {
-    console.log(`Server läuft auf Port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
 });
