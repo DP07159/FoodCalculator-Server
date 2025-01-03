@@ -1,23 +1,13 @@
 {
-  "name": "foodcalculator-server",
-  "version": "1.0.0",
-  "description": "Backend-Server für den Food Calculator, der Rezepte und Wochenpläne verwaltet.",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "keywords": [
-    "nodejs",
-    "express",
-    "cors",
-    "food",
-    "calculator",
-    "backend"
-  ],
-  "author": "Dein Name",
-  "license": "MIT",
-  "dependencies": {
-    "express": "^4.17.1",
-    "cors": "^2.8.5"
-  }
+    "name": "foodcalculator-server",
+    "version": "1.0.0",
+    "description": "Backend-Server für den Food Calculator, der Rezepte und Wochenpläne verwaltet.",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "express": "^4.17.1",
+        "cors": "^2.8.5"
+    }
 }
