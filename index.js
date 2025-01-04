@@ -18,7 +18,7 @@ function readFile(filePath, callback) {
   fs.readFile(filePath, "utf8", (err, data) => {
     if (err) return callback(err, null);
     try {
-      const parsedData = JSON.parse(data || "{}");
+      const parsedData = JSON.parse(data || "[]");
       callback(null, parsedData);
     } catch (parseError) {
       callback(parseError, null);
