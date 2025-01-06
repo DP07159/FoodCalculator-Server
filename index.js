@@ -1,65 +1,82 @@
 const express = require("express");
+const cors = require("cors");
 const fs = require("fs");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+app.use(cors());
 app.use(express.json());
 
-// Datei-Pfade für JSON-Dateien
-const recipesFile = "recipes.json";
-const plansFile = "plans.json";
+// Pfade für die JSON-Dateien
+const recipesFile = "./recipes.json";
+const plansFile = "./plans.json";
 
-// Helper-Funktion: Daten aus Datei laden
-function loadData(filePath) {
-  if (fs.existsSync(filePath)) {
-    const data = fs.readFileSync(filePath, "utf8");
-    return JSON.parse(data);
-  }
-  return [];
+// Globale Variablen für Daten
+let recipes = [];
+let plans = {};
+
+// JSON-Daten beim Serverstart laden
+if (fs.existsSync(recipesFile)) {
+  const data = fs.readFileSync(recipesFile);
+  recipes = JSON.parse(data);
+  console.log("Rezepte erfolgreich geladen.");
 }
 
-// Helper-Funktion: Daten in Datei speichern
-function saveData(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+if (fs.existsSync(plansFile)) {
+  const data = fs.readFileSync(plansFile);
+  plans = JSON.parse(data);
+  console.log("Pläne erfolgreich geladen.");
 }
 
-// Initialdaten laden
-let recipes = loadData(recipesFile);
-let plans = loadData(plansFile);
+// Funktion: Rezepte in JSON-Datei speichern
+function saveRecipes() {
+  fs.writeFileSync(recipesFile, JSON.stringify(recipes, null, 2));
+  console.log("Rezepte erfolgreich gespeichert.");
+}
 
-// Endpunkte für Rezepte
+// Funktion: Pläne in JSON-Datei speichern
+function savePlans() {
+  fs.writeFileSync(plansFile, JSON.stringify(plans, null, 2));
+  console.log("Pläne erfolgreich gespeichert.");
+}
+
+// API-Endpoint: Alle Rezepte abrufen
 app.get("/recipes", (req, res) => {
   res.json(recipes);
 });
 
+// API-Endpoint: Rezept hinzufügen
 app.post("/recipes", (req, res) => {
-  const newRecipe = { id: Date.now(), ...req.body };
+  const newRecipe = req.body;
+  newRecipe.id = Date.now(); // Eindeutige ID generieren
   recipes.push(newRecipe);
-  saveData(recipesFile, recipes);
-  res.json(newRecipe);
+  saveRecipes(); // In JSON-Datei speichern
+  res.status(201).json(newRecipe);
 });
 
+// API-Endpoint: Rezept löschen
 app.delete("/recipes/:id", (req, res) => {
   const recipeId = parseInt(req.params.id);
   recipes = recipes.filter((recipe) => recipe.id !== recipeId);
-  saveData(recipesFile, recipes);
-  res.sendStatus(204);
+  saveRecipes(); // In JSON-Datei speichern
+  res.status(204).send();
 });
 
-// Endpunkte für Wochenpläne
+// API-Endpoint: Alle Pläne abrufen
 app.get("/plans", (req, res) => {
   res.json(plans);
 });
 
+// API-Endpoint: Plan speichern
 app.post("/plans", (req, res) => {
   const { name, plan } = req.body;
   plans[name] = plan;
-  saveData(plansFile, plans);
-  res.sendStatus(200);
+  savePlans(); // In JSON-Datei speichern
+  res.status(201).send();
 });
 
 // Server starten
 app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server läuft auf http://localhost:${PORT}`);
 });
