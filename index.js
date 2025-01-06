@@ -17,29 +17,58 @@ let recipes = [];
 let plans = {};
 
 // JSON-Daten beim Serverstart laden
-if (fs.existsSync(recipesFile)) {
-  const data = fs.readFileSync(recipesFile);
-  recipes = JSON.parse(data);
-  console.log("Rezepte erfolgreich geladen.");
+function loadRecipes() {
+  if (fs.existsSync(recipesFile)) {
+    try {
+      const data = fs.readFileSync(recipesFile, "utf-8");
+      recipes = JSON.parse(data);
+      console.log("Rezepte erfolgreich geladen.");
+    } catch (err) {
+      console.error("Fehler beim Laden der Rezepte:", err);
+    }
+  } else {
+    console.log("Rezepte-Datei nicht gefunden. Erstelle neue Datei.");
+    fs.writeFileSync(recipesFile, JSON.stringify([], null, 2));
+  }
 }
 
-if (fs.existsSync(plansFile)) {
-  const data = fs.readFileSync(plansFile);
-  plans = JSON.parse(data);
-  console.log("Pläne erfolgreich geladen.");
+function loadPlans() {
+  if (fs.existsSync(plansFile)) {
+    try {
+      const data = fs.readFileSync(plansFile, "utf-8");
+      plans = JSON.parse(data);
+      console.log("Pläne erfolgreich geladen.");
+    } catch (err) {
+      console.error("Fehler beim Laden der Pläne:", err);
+    }
+  } else {
+    console.log("Pläne-Datei nicht gefunden. Erstelle neue Datei.");
+    fs.writeFileSync(plansFile, JSON.stringify({}, null, 2));
+  }
 }
 
-// Funktion: Rezepte in JSON-Datei speichern
+// JSON-Daten in Dateien speichern
 function saveRecipes() {
-  fs.writeFileSync(recipesFile, JSON.stringify(recipes, null, 2));
-  console.log("Rezepte erfolgreich gespeichert.");
+  try {
+    fs.writeFileSync(recipesFile, JSON.stringify(recipes, null, 2));
+    console.log("Rezepte erfolgreich gespeichert.");
+  } catch (err) {
+    console.error("Fehler beim Speichern der Rezepte:", err);
+  }
 }
 
-// Funktion: Pläne in JSON-Datei speichern
 function savePlans() {
-  fs.writeFileSync(plansFile, JSON.stringify(plans, null, 2));
-  console.log("Pläne erfolgreich gespeichert.");
+  try {
+    fs.writeFileSync(plansFile, JSON.stringify(plans, null, 2));
+    console.log("Pläne erfolgreich gespeichert.");
+  } catch (err) {
+    console.error("Fehler beim Speichern der Pläne:", err);
+  }
 }
+
+// Beim Start Rezepte und Pläne laden
+loadRecipes();
+loadPlans();
 
 // API-Endpoint: Alle Rezepte abrufen
 app.get("/recipes", (req, res) => {
