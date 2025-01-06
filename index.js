@@ -72,6 +72,7 @@ loadPlans();
 
 // API-Endpoint: Alle Rezepte abrufen
 app.get("/recipes", (req, res) => {
+  console.log("Rezepte werden abgerufen:", recipes);
   res.json(recipes);
 });
 
@@ -81,6 +82,7 @@ app.post("/recipes", (req, res) => {
   newRecipe.id = Date.now(); // Eindeutige ID generieren
   recipes.push(newRecipe);
   saveRecipes(); // In JSON-Datei speichern
+  console.log("Neues Rezept hinzugefügt:", newRecipe);
   res.status(201).json(newRecipe);
 });
 
@@ -89,11 +91,13 @@ app.delete("/recipes/:id", (req, res) => {
   const recipeId = parseInt(req.params.id);
   recipes = recipes.filter((recipe) => recipe.id !== recipeId);
   saveRecipes(); // In JSON-Datei speichern
+  console.log(`Rezept mit ID ${recipeId} gelöscht.`);
   res.status(204).send();
 });
 
 // API-Endpoint: Alle Pläne abrufen
 app.get("/plans", (req, res) => {
+  console.log("Pläne werden abgerufen:", plans);
   res.json(plans);
 });
 
@@ -102,6 +106,7 @@ app.post("/plans", (req, res) => {
   const { name, plan } = req.body;
   plans[name] = plan;
   savePlans(); // In JSON-Datei speichern
+  console.log(`Plan "${name}" gespeichert.`);
   res.status(201).send();
 });
 
