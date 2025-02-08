@@ -9,6 +9,18 @@ const PORT = process.env.PORT || 3000;
 // Render speichert nur dauerhaft in /data!
 const DB_PATH = "/data/database.db";
 
+// Stelle sicher, dass /data existiert
+if (!fs.existsSync("/data")) {
+  console.log("/data-Verzeichnis nicht gefunden – erstelle es.");
+  fs.mkdirSync("/data");
+}
+
+// Falls die Datenbank-Datei fehlt, erstelle sie
+if (!fs.existsSync(DB_PATH)) {
+  console.log("Datenbank nicht gefunden – erstelle neue Datei.");
+  fs.writeFileSync(DB_PATH, "");
+}
+
 // Prüfe, ob das /data-Verzeichnis existiert, falls nicht, erstelle es.
 if (!fs.existsSync("/data")) {
   fs.mkdirSync("/data");
