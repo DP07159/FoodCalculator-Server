@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
+const sqlite3 = require("sqlite3").verbose();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,106 +8,109 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Pfade für die JSON-Dateien
-const recipesFile = "./recipes.json";
-const plansFile = "./plans.json";
-
-// Globale Variablen für Daten
-let recipes = [];
-let plans = {};
-
-// JSON-Daten beim Serverstart laden
-function loadRecipes() {
-  if (fs.existsSync(recipesFile)) {
-    try {
-      const data = fs.readFileSync(recipesFile, "utf-8");
-      recipes = JSON.parse(data);
-      console.log("Rezepte erfolgreich geladen.");
-    } catch (err) {
-      console.error("Fehler beim Laden der Rezepte:", err);
-    }
+// Verbindung zur SQLite-Datenbank herstellen
+const db = new sqlite3.Database("./database.db", (err) => {
+  if (err) {
+    console.error("Fehler beim Öffnen der SQLite-Datenbank:", err);
   } else {
-    console.log("Rezepte-Datei nicht gefunden. Erstelle neue Datei.");
-    fs.writeFileSync(recipesFile, JSON.stringify([], null, 2));
+    console.log("Verbunden mit SQLite-Datenbank.");
   }
-}
+});
 
-function loadPlans() {
-  if (fs.existsSync(plansFile)) {
-    try {
-      const data = fs.readFileSync(plansFile, "utf-8");
-      plans = JSON.parse(data);
-      console.log("Pläne erfolgreich geladen.");
-    } catch (err) {
-      console.error("Fehler beim Laden der Pläne:", err);
-    }
-  } else {
-    console.log("Pläne-Datei nicht gefunden. Erstelle neue Datei.");
-    fs.writeFileSync(plansFile, JSON.stringify({}, null, 2));
-  }
-}
+// Tabellen für Rezepte und Pläne erstellen (falls nicht vorhanden)
+db.serialize(() => {
+  db.run(
+    `CREATE TABLE IF NOT EXISTS recipes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      calories INTEGER NOT NULL,
+      mealTypes TEXT NOT NULL
+    )`
+  );
 
-// JSON-Daten in Dateien speichern
-function saveRecipes() {
-  try {
-    fs.writeFileSync(recipesFile, JSON.stringify(recipes, null, 2));
-    console.log("Rezepte erfolgreich gespeichert.");
-  } catch (err) {
-    console.error("Fehler beim Speichern der Rezepte:", err);
-  }
-}
+  db.run(
+    `CREATE TABLE IF NOT EXISTS plans (
+      name TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    )`
+  );
 
-function savePlans() {
-  try {
-    fs.writeFileSync(plansFile, JSON.stringify(plans, null, 2));
-    console.log("Pläne erfolgreich gespeichert.");
-  } catch (err) {
-    console.error("Fehler beim Speichern der Pläne:", err);
-  }
-}
-
-// Beim Start Rezepte und Pläne laden
-loadRecipes();
-loadPlans();
+  console.log("Tabellen wurden überprüft und erstellt.");
+});
 
 // API-Endpoint: Alle Rezepte abrufen
 app.get("/recipes", (req, res) => {
-  console.log("Rezepte werden abgerufen:", recipes);
-  res.json(recipes);
+  db.all("SELECT * FROM recipes", [], (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    res.json(rows);
+  });
 });
 
 // API-Endpoint: Rezept hinzufügen
 app.post("/recipes", (req, res) => {
-  const newRecipe = req.body;
-  newRecipe.id = Date.now(); // Eindeutige ID generieren
-  recipes.push(newRecipe);
-  saveRecipes(); // In JSON-Datei speichern
-  console.log("Neues Rezept hinzugefügt:", newRecipe);
-  res.status(201).json(newRecipe);
+  const { name, calories, mealTypes } = req.body;
+  const mealTypesString = JSON.stringify(mealTypes);
+
+  db.run(
+    "INSERT INTO recipes (name, calories, mealTypes) VALUES (?, ?, ?)",
+    [name, calories, mealTypesString],
+    function (err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.status(201).json({ id: this.lastID, name, calories, mealTypes });
+    }
+  );
 });
 
 // API-Endpoint: Rezept löschen
 app.delete("/recipes/:id", (req, res) => {
-  const recipeId = parseInt(req.params.id);
-  recipes = recipes.filter((recipe) => recipe.id !== recipeId);
-  saveRecipes(); // In JSON-Datei speichern
-  console.log(`Rezept mit ID ${recipeId} gelöscht.`);
-  res.status(204).send();
+  const recipeId = req.params.id;
+
+  db.run("DELETE FROM recipes WHERE id = ?", recipeId, function (err) {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    res.status(204).send();
+  });
 });
 
 // API-Endpoint: Alle Pläne abrufen
 app.get("/plans", (req, res) => {
-  console.log("Pläne werden abgerufen:", plans);
-  res.json(plans);
+  db.all("SELECT * FROM plans", [], (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    const plans = {};
+    rows.forEach((row) => {
+      plans[row.name] = JSON.parse(row.data);
+    });
+    res.json(plans);
+  });
 });
 
 // API-Endpoint: Plan speichern
 app.post("/plans", (req, res) => {
   const { name, plan } = req.body;
-  plans[name] = plan;
-  savePlans(); // In JSON-Datei speichern
-  console.log(`Plan "${name}" gespeichert.`);
-  res.status(201).send();
+  const planString = JSON.stringify(plan);
+
+  db.run(
+    "INSERT OR REPLACE INTO plans (name, data) VALUES (?, ?)",
+    [name, planString],
+    function (err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+      res.status(201).send();
+    }
+  );
 });
 
 // Server starten
