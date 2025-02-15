@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// **SQLite-Datenbank erstellen**
+// **Datenbank initialisieren**
 const db = new sqlite3.Database("./food_calculator.sqlite", (err) => {
   if (err) console.error("❌ Fehler beim Öffnen der Datenbank:", err.message);
   else console.log("✅ Erfolgreich mit SQLite verbunden.");
@@ -44,7 +44,7 @@ app.get("/recipes", (req, res) => {
 app.post("/recipes", (req, res) => {
   let { name, calories, mealTypes } = req.body;
 
-  if (!Array.isArray(mealTypes)) mealTypes = [mealTypes]; // Sicherstellen, dass es ein Array ist
+  if (!Array.isArray(mealTypes)) mealTypes = [mealTypes];
   const mealTypesJSON = JSON.stringify(mealTypes);
 
   db.run(
