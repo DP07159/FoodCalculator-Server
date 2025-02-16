@@ -96,5 +96,48 @@ app.post("/meal_plans", (req, res) => {
   );
 });
 
+// **GET: Einzelnen Wochenplan abrufen**
+app.get("/meal_plans/:id", (req, res) => {
+  const { id } = req.params;
+  
+  db.get("SELECT * FROM meal_plans WHERE id = ?", [id], (err, row) => {
+    if (err) {
+      console.error("❌ Fehler beim Laden des Plans:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (!row) {
+      return res.status(404).json({ error: "Plan nicht gefunden" });
+    }
+
+    try {
+      const planData = JSON.parse(row.data); // JSON korrekt parsen
+      res.json({ id: row.id, name: row.name, data: planData });
+    } catch (parseError) {
+      console.error("❌ Fehler beim JSON-Parsing des Plans:", parseError.message);
+      res.status(500).json({ error: "Fehler beim Verarbeiten des Plans" });
+    }
+  });
+});
+
+// **DELETE: Rezept löschen**
+app.delete("/recipes/:id", (req, res) => {
+  const { id } = req.params;
+
+  db.run("DELETE FROM recipes WHERE id = ?", [id], function (err) {
+    if (err) {
+      console.error("❌ Fehler beim Löschen des Rezepts:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (this.changes === 0) {
+      return res.status(404).json({ error: "Rezept nicht gefunden" });
+    }
+
+    console.log(`✅ Rezept mit ID ${id} erfolgreich gelöscht`);
+    res.status(200).json({ message: "Rezept erfolgreich gelöscht" });
+  });
+});
+
 // **Server starten**
 app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
