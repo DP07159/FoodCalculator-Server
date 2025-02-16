@@ -120,6 +120,54 @@ app.get("/meal_plans/:id", (req, res) => {
   });
 });
 
+// **DELETE: Wochenplan löschen**
+app.delete("/meal_plans/:id", (req, res) => {
+  const { id } = req.params;
+
+  db.run("DELETE FROM meal_plans WHERE id = ?", [id], function (err) {
+    if (err) {
+      console.error("❌ Fehler beim Löschen des Wochenplans:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (this.changes === 0) {
+      return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+    }
+
+    console.log(`✅ Wochenplan mit ID ${id} gelöscht`);
+    res.status(200).json({ message: "Wochenplan erfolgreich gelöscht" });
+  });
+});
+
+// **PUT: Wochenplan aktualisieren**
+app.put("/meal_plans/:id", (req, res) => {
+  const { id } = req.params;
+  const { name, data } = req.body;
+
+  if (!name || !data) {
+    return res.status(400).json({ error: "Name und Daten sind erforderlich!" });
+  }
+
+  const jsonData = JSON.stringify(data);
+  db.run(
+    "UPDATE meal_plans SET name = ?, data = ? WHERE id = ?",
+    [name, jsonData, id],
+    function (err) {
+      if (err) {
+        console.error("❌ Fehler beim Aktualisieren des Wochenplans:", err.message);
+        return res.status(500).json({ error: err.message });
+      }
+
+      if (this.changes === 0) {
+        return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+      }
+
+      console.log(`✅ Wochenplan mit ID ${id} aktualisiert`);
+      res.status(200).json({ message: "Wochenplan erfolgreich aktualisiert" });
+    }
+  );
+});
+
 // **DELETE: Rezept löschen**
 app.delete("/recipes/:id", (req, res) => {
   const { id } = req.params;
