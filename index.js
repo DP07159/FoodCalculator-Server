@@ -72,5 +72,20 @@ app.post("/recipes", (req, res) => {
   );
 });
 
+// **DELETE: Rezept löschen**
+app.delete("/recipes/:id", (req, res) => {
+  const { id } = req.params;
+  
+  db.run("DELETE FROM recipes WHERE id = ?", [id], function (err) {
+    if (err) {
+      console.error("❌ Fehler beim Löschen des Rezepts:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+
+    console.log(`✅ Rezept mit ID ${id} erfolgreich gelöscht`);
+    res.status(200).json({ message: "Rezept erfolgreich gelöscht" });
+  });
+});
+
 // **Server starten**
 app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
