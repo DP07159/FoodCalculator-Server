@@ -1,6 +1,0 @@
-[
-  { "id": 1, "name": "Oatmeal", "calories": 200, "mealTypes": ["breakfast"] },
-  { "id": 2, "name": "Chicken Salad", "calories": 400, "mealTypes": ["lunch"] },
-  { "id": 3, "name": "Pasta", "calories": 500, "mealTypes": ["dinner"] },
-  { "id": 4, "name": "Snack Bar", "calories": 150, "mealTypes": ["snack"] }
-]
