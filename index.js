@@ -24,45 +24,46 @@ db.run(
   )`
 );
 
-// **GET: Alle Rezepte abrufen**
-app.get("/recipes", (req, res) => {
-  db.all("SELECT * FROM recipes", [], (err, rows) => {
+// **Wochenplan-Tabelle erstellen**
+db.run(
+  `CREATE TABLE IF NOT EXISTS meal_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    data TEXT NOT NULL
+  )`
+);
+
+// **GET: Alle Wochenpläne abrufen**
+app.get("/meal_plans", (req, res) => {
+  db.all("SELECT * FROM meal_plans", [], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-
-    const formattedRecipes = rows.map((recipe) => ({
-      id: recipe.id,
-      name: recipe.name,
-      calories: recipe.calories,
-      mealTypes: JSON.parse(recipe.mealTypes) || []
-    }));
-
-    res.json(formattedRecipes);
+    res.json(rows);
   });
 });
 
-// **POST: Neues Rezept hinzufügen**
-app.post("/recipes", (req, res) => {
-  let { name, calories, mealTypes } = req.body;
+// **POST: Wochenplan speichern**
+app.post("/meal_plans", (req, res) => {
+  const { name, data } = req.body;
+  if (!name || !data) return res.status(400).json({ error: "Name und Daten erforderlich!" });
 
-  if (!Array.isArray(mealTypes)) mealTypes = [mealTypes];
-  const mealTypesJSON = JSON.stringify(mealTypes);
-
+  const jsonData = JSON.stringify(data);
   db.run(
-    "INSERT INTO recipes (name, calories, mealTypes) VALUES (?, ?, ?)",
-    [name, calories, mealTypesJSON],
+    "INSERT INTO meal_plans (name, data) VALUES (?, ?)",
+    [name, jsonData],
     function (err) {
       if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, name, calories, mealTypes });
+      res.status(201).json({ id: this.lastID, name, data });
     }
   );
 });
 
-// **DELETE: Rezept löschen**
-app.delete("/recipe/:id", (req, res) => {
+// **GET: Einzelnen Wochenplan abrufen**
+app.get("/meal_plans/:id", (req, res) => {
   const { id } = req.params;
-  db.run("DELETE FROM recipes WHERE id = ?", [id], function (err) {
+  db.get("SELECT * FROM meal_plans WHERE id = ?", [id], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.status(200).json({ message: "Rezept gelöscht", id });
+    if (!row) return res.status(404).json({ error: "Plan nicht gefunden" });
+    res.json({ id: row.id, name: row.name, data: JSON.parse(row.data) });
   });
 });
 
