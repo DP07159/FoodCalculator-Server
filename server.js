@@ -24,6 +24,10 @@ app.post('/register', (req, res) => {
     });
 });
 
+// **Server starten**
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
+
 // **User-Login**
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
