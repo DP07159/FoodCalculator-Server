@@ -53,3 +53,9 @@ app.post('/login', (req, res) => {
 // **🌍 Server starten**
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
+
+app._router.stack.forEach(layer => {
+    if (layer.route) {
+        console.log("🔹 Route:", layer.route.path);
+    }
+});
