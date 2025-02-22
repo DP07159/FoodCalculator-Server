@@ -2,7 +2,7 @@
   "name": "foodcalculator-server",
   "version": "1.0.0",
   "description": "Backend für den Food Calculator",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
     "start": "node index.js"
   },
