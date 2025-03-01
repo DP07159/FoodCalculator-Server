@@ -21,23 +21,30 @@ app.use(express.json());
 app.use(cors());
 const bcrypt = require('bcrypt');
 
-// ✅ Registrierung (POST /register)
 app.post('/register', async (req, res) => {
+    console.log("📢 Registrierungs-Anfrage erhalten. RAW-Body:", req.body);
+
     const { username, password } = req.body;
 
     if (!username || !password) {
+        console.log("❌ Fehler: Benutzername oder Passwort fehlt!", req.body);
         return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
     }
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
+        console.log("🔑 Passwort erfolgreich gehasht:", hashedPassword);
+
         db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
             if (err) {
+                console.log("❌ Fehler beim Speichern des Users:", err.message);
                 return res.status(500).json({ error: "❌ Fehler bei der Registrierung" });
             }
+            console.log(`✅ User mit ID ${this.lastID} gespeichert!`);
             res.status(201).json({ message: "✅ Registrierung erfolgreich!", userId: this.lastID });
         });
     } catch (err) {
+        console.log("❌ Fehler beim Hashing:", err.message);
         res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts" });
     }
 });
