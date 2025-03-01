@@ -18,11 +18,17 @@ db.run(`CREATE TABLE IF NOT EXISTS users (
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 const bcrypt = require('bcrypt');
 
-app.post('/register', async (req, res) => {
+app.post('/register', (req, res) => {
     console.log("📢 Registrierungs-Anfrage erhalten. RAW-Body:", req.body);
+
+    if (!req.body || Object.keys(req.body).length === 0) {
+        console.log("❌ FEHLER: Der Server empfängt KEINE Daten!");
+        return res.status(400).json({ error: "❌ Der Server empfängt KEINE Daten!" });
+    }
 
     const { username, password } = req.body;
 
@@ -31,22 +37,7 @@ app.post('/register', async (req, res) => {
         return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
     }
 
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        console.log("🔑 Passwort erfolgreich gehasht:", hashedPassword);
-
-        db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
-            if (err) {
-                console.log("❌ Fehler beim Speichern des Users:", err.message);
-                return res.status(500).json({ error: "❌ Fehler bei der Registrierung" });
-            }
-            console.log(`✅ User mit ID ${this.lastID} gespeichert!`);
-            res.status(201).json({ message: "✅ Registrierung erfolgreich!", userId: this.lastID });
-        });
-    } catch (err) {
-        console.log("❌ Fehler beim Hashing:", err.message);
-        res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts" });
-    }
+    res.json({ message: "✅ Registrierungstests erfolgreich!", receivedData: req.body });
 });
 
 // ✅ Login (POST /login)
