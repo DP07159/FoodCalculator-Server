@@ -1,11 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-
-app.use(cors({
-    origin: '*',  // Erlaubt alle Domains (nicht empfohlen für Produktion)
-    credentials: true
-}));
-
 const sqlite3 = require('sqlite3').verbose();
 const db = new sqlite3.Database('./users.db', (err) => {
     if (err) {
@@ -14,6 +8,11 @@ const db = new sqlite3.Database('./users.db', (err) => {
         console.log('✅ Erfolgreich mit SQLite verbunden (users.db)');
     }
 });
+
+app.use(cors({
+    origin: '*',  // Erlaubt alle Domains (nicht empfohlen für Produktion)
+    credentials: true
+}));
 
 // ✅ User-Tabelle erstellen (falls nicht existiert)
 db.run(`CREATE TABLE IF NOT EXISTS users (
