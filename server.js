@@ -9,11 +9,6 @@ const db = new sqlite3.Database('./users.db', (err) => {
     }
 });
 
-app.use(cors({
-    origin: '*',  // Erlaubt alle Domains (nicht empfohlen für Produktion)
-    credentials: true
-}));
-
 // ✅ User-Tabelle erstellen (falls nicht existiert)
 db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,7 +19,10 @@ db.run(`CREATE TABLE IF NOT EXISTS users (
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors());
+app.use(cors({
+    origin: '*',  // Erlaubt alle Domains (nicht empfohlen für Produktion)
+    credentials: true
+}));
 
 const bcrypt = require('bcrypt');
 const session = require('express-session');
