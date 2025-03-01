@@ -23,13 +23,14 @@ app.use(cors());
 
 const bcrypt = require('bcrypt');
 const session = require('express-session');
+const SQLiteStore = require('connect-sqlite3')(session);
 
-// Session Middleware für Login-Handling
 app.use(session({
-    secret: 'deinGeheimerSchlüssel',  // Sollte in der .env-Datei liegen!
+    store: new SQLiteStore({ db: 'sessions.db', dir: './data' }),
+    secret: 'deinGeheimerSchlüssel',
     resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false }  // Falls HTTPS genutzt wird -> true setzen
+    saveUninitialized: false,
+    cookie: { secure: false } // Falls HTTPS, setze secure: true
 }));
 
 // ✅ Registrierung (POST /register)
