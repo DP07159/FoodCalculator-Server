@@ -20,16 +20,12 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
-const bcrypt = require('bcrypt');
 
 // Register Route
-app.post('/register', (req, res) => {
-    console.log("📢 Registrierungs-Anfrage erhalten. RAW-Body:", req.body);
+const bcrypt = require('bcrypt');
 
-    if (!req.body || Object.keys(req.body).length === 0) {
-        console.log("❌ FEHLER: Der Server empfängt KEINE Daten!");
-        return res.status(400).json({ error: "❌ Der Server empfängt KEINE Daten!" });
-    }
+app.post('/register', async (req, res) => {
+    console.log("📢 Registrierungs-Anfrage erhalten mit Daten:", req.body);
 
     const { username, password } = req.body;
 
@@ -38,8 +34,24 @@ app.post('/register', (req, res) => {
         return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
     }
 
-    res.json({ message: "✅ Registrierungstests erfolgreich!", receivedData: req.body });
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        console.log("🔑 Passwort erfolgreich gehasht:", hashedPassword);
+
+        db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
+            if (err) {
+                console.log("❌ Fehler beim Speichern des Users:", err.message);
+                return res.status(500).json({ error: "❌ Fehler bei der Registrierung" });
+            }
+            console.log(`✅ User mit ID ${this.lastID} gespeichert!`);
+            res.status(201).json({ message: "✅ Registrierung erfolgreich!", userId: this.lastID });
+        });
+    } catch (err) {
+        console.log("❌ Fehler beim Hashing:", err.message);
+        res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts" });
+    }
 });
+
 
 // ✅ Login (POST /login)
 app.post('/login', (req, res) => {
