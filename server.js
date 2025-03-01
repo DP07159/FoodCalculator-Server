@@ -55,6 +55,8 @@ app.post('/register', async (req, res) => {
 
 // ✅ Login (POST /login)
 app.post('/login', (req, res) => {
+    console.log("📢 Login-Anfrage erhalten:", req.body);
+
     const { username, password } = req.body;
 
     if (!username || !password) {
@@ -63,14 +65,17 @@ app.post('/login', (req, res) => {
 
     db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
         if (err || !user) {
+            console.log("❌ Benutzer nicht gefunden!");
             return res.status(401).json({ error: "❌ Benutzer nicht gefunden!" });
         }
 
         const passwordMatch = await bcrypt.compare(password, user.password);
         if (!passwordMatch) {
+            console.log("❌ Falsches Passwort!");
             return res.status(401).json({ error: "❌ Falsches Passwort!" });
         }
 
+        console.log("✅ Login erfolgreich für:", username);
         res.json({ message: "✅ Login erfolgreich!", userId: user.id });
     });
 });
