@@ -1,7 +1,15 @@
 const express = require("express");
+const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const sqlite3 = require("sqlite3").verbose();
+
+const app = express();  // ← FEHLTE VIELLEICHT!
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(express.json());
+app.use(cors());
 
 const router = express.Router();
 const db = new sqlite3.Database("food_calculator.sqlite");
