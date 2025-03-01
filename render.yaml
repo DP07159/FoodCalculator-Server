@@ -1,1 +1,10 @@
+services:
+  - type: web
+    name: mein-food-calculator
+    env: node
+    buildCommand: npm install && npm rebuild && node server.js
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18
 
