@@ -70,9 +70,13 @@ app.post('/login', (req, res) => {
     }
 
     db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-        if (err || !user) {
-            console.log("❌ Benutzer nicht gefunden!");
-            return res.status(401).json({ error: "❌ Benutzer nicht gefunden!" });
+        if (err) {
+            console.log("❌ Datenbankfehler:", err.message);
+            return res.status(500).json({ error: "❌ Fehler beim Abrufen der Benutzerdaten!" });
+        }
+        if (!user) {
+            console.log("❌ Benutzername nicht gefunden!");
+            return res.status(401).json({ error: "❌ Benutzername existiert nicht!" });
         }
 
         const passwordMatch = await bcrypt.compare(password, user.password);
