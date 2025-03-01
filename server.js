@@ -19,6 +19,28 @@ db.run(`CREATE TABLE IF NOT EXISTS users (
 const app = express();
 app.use(express.json());
 app.use(cors());
+const bcrypt = require('bcrypt');
+
+// ✅ Registrierung (POST /register)
+app.post('/register', async (req, res) => {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+        return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
+    }
+
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
+            if (err) {
+                return res.status(500).json({ error: "❌ Fehler bei der Registrierung" });
+            }
+            res.status(201).json({ message: "✅ Registrierung erfolgreich!", userId: this.lastID });
+        });
+    } catch (err) {
+        res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts" });
+    }
+});
 
 // ✅ TEST-ROUTE, um zu sehen, ob das Backend läuft
 app.get('/test', (req, res) => {
