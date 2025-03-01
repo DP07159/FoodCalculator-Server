@@ -23,10 +23,8 @@ app.use(cors());
 
 const bcrypt = require('bcrypt');
 const session = require('express-session');
-const SQLiteStore = require('connect-sqlite3')(session);
 
 app.use(session({
-    store: new SQLiteStore({ db: 'sessions.db', dir: './data' }),
     secret: 'deinGeheimerSchlüssel',
     resave: false,
     saveUninitialized: false,
