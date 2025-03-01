@@ -1,159 +1,61 @@
-const express = require('express');
-const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database('./users.db', (err) => {
-    if (err) {
-        console.error('❌ Fehler beim Verbinden mit SQLite:', err.message);
-    } else {
-        console.log('✅ Erfolgreich mit SQLite verbunden (users.db)');
-    }
-});
+const express = require("express");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const sqlite3 = require("sqlite3").verbose();
 
-// ✅ User-Tabelle erstellen (falls nicht existiert)
-db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL
-)`);
+const router = express.Router();
+const db = new sqlite3.Database("food_calculator.sqlite");
+const SECRET_KEY = "deinGeheimerSchluessel"; // Später in ENV-Variablen speichern!
 
-const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors({
-    origin: '*',  // Erlaubt alle Domains (nicht empfohlen für Produktion)
-    credentials: true
-}));
+// Registrierung
+router.post("/register", async (req, res) => {
+    const { username, email, password } = req.body;
 
-const bcrypt = require('bcrypt');
-const session = require('express-session');
+    // Prüfen, ob Benutzer bereits existiert
+    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, row) => {
+        if (row) return res.status(400).json({ error: "E-Mail bereits registriert" });
 
-app.use(session({
-    secret: 'deinGeheimerSchlüssel',
-    resave: false,
-    saveUninitialized: false,
-    cookie: { secure: false } // Falls HTTPS, setze secure: true
-}));
+        // Passwort hashen
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-// ✅ Registrierung (POST /register)
-app.post('/register', async (req, res) => {
-    console.log("📢 Registrierungs-Anfrage erhalten mit Daten:", req.body);
-
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ error: "❌ Bitte Benutzername & Passwort eingeben!" });
-    }
-
-    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, existingUser) => {
-        if (err) {
-            console.error("❌ Datenbankfehler:", err.message);
-            return res.status(500).json({ error: "❌ Fehler bei der Registrierung!" });
-        }
-        if (existingUser) {
-            return res.status(409).json({ error: "❌ Dieser Benutzername ist bereits vergeben!" });
-        }
-
-        try {
-            const hashedPassword = await bcrypt.hash(password, 10);
-            db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
-                if (err) {
-                    console.error("❌ Fehler beim Speichern des Users:", err.message);
-                    return res.status(500).json({ error: "❌ Fehler bei der Registrierung!" });
-                }
-                console.log(`✅ User mit ID ${this.lastID} gespeichert!`);
-                res.status(201).json({ message: "✅ Registrierung erfolgreich!" });
-            });
-        } catch (err) {
-            console.error("❌ Fehler beim Hashing:", err.message);
-            res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts!" });
-        }
-    });
-});
-
-// ✅ Login (POST /login)
-app.post('/login', (req, res) => {
-    console.log("📢 Login-Anfrage erhalten:", req.body);
-
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
-    }
-
-    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-        if (err) {
-            console.error("❌ Datenbankfehler:", err.message);
-            return res.status(500).json({ error: "❌ Fehler beim Abrufen der Benutzerdaten!" });
-        }
-        if (!user) {
-            return res.status(401).json({ error: "❌ Benutzername existiert nicht!" });
-        }
-
-        const passwordMatch = await bcrypt.compare(password, user.password);
-        if (!passwordMatch) {
-            return res.status(401).json({ error: "❌ Falsches Passwort!" });
-        }
-
-        // ✅ Nutzer in Session speichern
-        req.session.userId = user.id;
-        req.session.username = user.username;
-
-        console.log("✅ Login erfolgreich für:", username);
-        res.json({ 
-            message: "✅ Login erfolgreich!", 
-            userId: user.id,
-            redirect: "/dashboard"  // Hier die Weiterleitung nach Login
+        // Neuen Benutzer speichern
+        db.run("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", 
+               [username, email, hashedPassword], (err) => {
+            if (err) return res.status(500).json({ error: "Fehler bei der Registrierung" });
+            res.status(201).json({ message: "Benutzer erfolgreich registriert" });
         });
     });
 });
 
-// ✅ Middleware für Authentifizierung
-function isAuthenticated(req, res, next) {
-    if (req.session.userId) {
-        return next();
-    } else {
-        return res.status(401).json({ error: "❌ Nicht eingeloggt!" });
-    }
-}
+// Login
+router.post("/login", (req, res) => {
+    const { email, password } = req.body;
 
-// ✅ Geschützte Route nach Login (Dashboard / Food Calculator)
-app.get('/dashboard', isAuthenticated, (req, res) => {
-    res.json({ message: `Willkommen, ${req.session.username}!`, userId: req.session.userId });
-});
+    db.get("SELECT * FROM users WHERE email = ?", [email], async (err, user) => {
+        if (!user) return res.status(400).json({ error: "Ungültige E-Mail oder Passwort" });
 
-// ✅ Login (POST /login)
-app.post('/login', (req, res) => {
-    console.log("📢 Login-Anfrage erhalten:", req.body);
+        // Passwort vergleichen
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) return res.status(400).json({ error: "Ungültige E-Mail oder Passwort" });
 
-    const { username, password } = req.body;
+        // JWT-Token erstellen
+        const token = jwt.sign({ id: user.id, email: user.email }, SECRET_KEY, { expiresIn: "2h" });
 
-    if (!username || !password) {
-        return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
-    }
-
-    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-        if (err) {
-            console.log("❌ Datenbankfehler:", err.message);
-            return res.status(500).json({ error: "❌ Fehler beim Abrufen der Benutzerdaten!" });
-        }
-        if (!user) {
-            console.log("❌ Benutzername nicht gefunden!");
-            return res.status(401).json({ error: "❌ Benutzername existiert nicht!" });
-        }
-
-        const passwordMatch = await bcrypt.compare(password, user.password);
-        if (!passwordMatch) {
-            console.log("❌ Falsches Passwort!");
-            return res.status(401).json({ error: "❌ Falsches Passwort!" });
-        }
-
-        console.log("✅ Login erfolgreich für:", username);
-        res.json({ message: "✅ Login erfolgreich!", userId: user.id });
+        res.json({ message: "Login erfolgreich", token });
     });
 });
 
-// ✅ TEST-ROUTE, um zu sehen, ob das Backend läuft
-app.get('/test', (req, res) => {
-    res.json({ message: "✅ API funktioniert!" });
-});
+const authMiddleware = (req, res, next) => {
+    const token = req.headers.authorization?.split(" ")[1];
+
+    if (!token) return res.status(401).json({ error: "Nicht autorisiert" });
+
+    jwt.verify(token, SECRET_KEY, (err, decoded) => {
+        if (err) return res.status(403).json({ error: "Ungültiges Token" });
+        req.user = decoded; // Benutzerinfo in Request speichern
+        next();
+    });
+};
 
 // ✅ SERVER STARTEN
 const PORT = process.env.PORT || 10000;
