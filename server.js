@@ -22,6 +22,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 const bcrypt = require('bcrypt');
 
+// Register Route
 app.post('/register', (req, res) => {
     console.log("📢 Registrierungs-Anfrage erhalten. RAW-Body:", req.body);
 
