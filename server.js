@@ -42,6 +42,28 @@ app.post('/register', async (req, res) => {
     }
 });
 
+// ✅ Login (POST /login)
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+        return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
+    }
+
+    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
+        if (err || !user) {
+            return res.status(401).json({ error: "❌ Benutzer nicht gefunden!" });
+        }
+
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) {
+            return res.status(401).json({ error: "❌ Falsches Passwort!" });
+        }
+
+        res.json({ message: "✅ Login erfolgreich!", userId: user.id });
+    });
+});
+
 // ✅ TEST-ROUTE, um zu sehen, ob das Backend läuft
 app.get('/test', (req, res) => {
     res.json({ message: "✅ API funktioniert!" });
