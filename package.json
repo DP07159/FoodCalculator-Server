@@ -11,6 +11,6 @@
     "bcrypt": "^5.0.1",
     "sqlite3": "^5.0.2",
     "cors": "^2.8.5",
-    "connect-sqlite3": "^0.0.12"
+    "connect-sqlite3": "^7.1.2"
   }
 }
