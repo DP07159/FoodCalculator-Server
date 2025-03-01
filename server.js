@@ -21,42 +21,100 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Register Route
 const bcrypt = require('bcrypt');
+const session = require('express-session');
 
+// Session Middleware für Login-Handling
+app.use(session({
+    secret: 'deinGeheimerSchlüssel',  // Sollte in der .env-Datei liegen!
+    resave: false,
+    saveUninitialized: true,
+    cookie: { secure: false }  // Falls HTTPS genutzt wird -> true setzen
+}));
+
+// ✅ Registrierung (POST /register)
 app.post('/register', async (req, res) => {
     console.log("📢 Registrierungs-Anfrage erhalten mit Daten:", req.body);
 
     const { username, password } = req.body;
-
     if (!username || !password) {
-        console.log("❌ Fehler: Benutzername oder Passwort fehlt!", req.body);
         return res.status(400).json({ error: "❌ Bitte Benutzername & Passwort eingeben!" });
     }
 
     db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, existingUser) => {
+        if (err) {
+            console.error("❌ Datenbankfehler:", err.message);
+            return res.status(500).json({ error: "❌ Fehler bei der Registrierung!" });
+        }
         if (existingUser) {
-            console.log("❌ Fehler: Benutzername bereits vergeben!");
-            return res.status(409).json({ error: "❌ Dieser Benutzername ist bereits vergeben. Bitte einen anderen wählen!" });
+            return res.status(409).json({ error: "❌ Dieser Benutzername ist bereits vergeben!" });
         }
 
         try {
             const hashedPassword = await bcrypt.hash(password, 10);
-            console.log("🔑 Passwort erfolgreich gehasht:", hashedPassword);
-
             db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function (err) {
                 if (err) {
-                    console.log("❌ Fehler beim Speichern des Users:", err.message);
-                    return res.status(500).json({ error: "❌ Fehler bei der Registrierung" });
+                    console.error("❌ Fehler beim Speichern des Users:", err.message);
+                    return res.status(500).json({ error: "❌ Fehler bei der Registrierung!" });
                 }
                 console.log(`✅ User mit ID ${this.lastID} gespeichert!`);
-                res.status(201).json({ message: "✅ Registrierung erfolgreich!", userId: this.lastID });
+                res.status(201).json({ message: "✅ Registrierung erfolgreich!" });
             });
         } catch (err) {
-            console.log("❌ Fehler beim Hashing:", err.message);
-            res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts" });
+            console.error("❌ Fehler beim Hashing:", err.message);
+            res.status(500).json({ error: "❌ Fehler beim Hashing des Passworts!" });
         }
     });
+});
+
+// ✅ Login (POST /login)
+app.post('/login', (req, res) => {
+    console.log("📢 Login-Anfrage erhalten:", req.body);
+
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: "❌ Benutzername & Passwort erforderlich!" });
+    }
+
+    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
+        if (err) {
+            console.error("❌ Datenbankfehler:", err.message);
+            return res.status(500).json({ error: "❌ Fehler beim Abrufen der Benutzerdaten!" });
+        }
+        if (!user) {
+            return res.status(401).json({ error: "❌ Benutzername existiert nicht!" });
+        }
+
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) {
+            return res.status(401).json({ error: "❌ Falsches Passwort!" });
+        }
+
+        // ✅ Nutzer in Session speichern
+        req.session.userId = user.id;
+        req.session.username = user.username;
+
+        console.log("✅ Login erfolgreich für:", username);
+        res.json({ 
+            message: "✅ Login erfolgreich!", 
+            userId: user.id,
+            redirect: "/dashboard"  // Hier die Weiterleitung nach Login
+        });
+    });
+});
+
+// ✅ Middleware für Authentifizierung
+function isAuthenticated(req, res, next) {
+    if (req.session.userId) {
+        return next();
+    } else {
+        return res.status(401).json({ error: "❌ Nicht eingeloggt!" });
+    }
+}
+
+// ✅ Geschützte Route nach Login (Dashboard / Food Calculator)
+app.get('/dashboard', isAuthenticated, (req, res) => {
+    res.json({ message: `Willkommen, ${req.session.username}!`, userId: req.session.userId });
 });
 
 // ✅ Login (POST /login)
