@@ -7,7 +7,26 @@ const sqlite3 = require("sqlite3").verbose();
 const app = express();  // ← FEHLTE VIELLEICHT!
 const PORT = process.env.PORT || 3000;
 
-//Testing
+// Datenbank-Erweiterung für neue Felder (nur einmalig notwendig)
+db.serialize(() => {
+    db.get(`PRAGMA table_info(recipes);`, (err, rows) => {
+        const existingColumns = rows.map(row => row.name);
+
+        if (!existingColumns.includes('ingredients')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN ingredients TEXT`, (err) => {
+                if (!err) console.log('Feld "ingredients" erfolgreich hinzugefügt.');
+            });
+        }
+
+        if (!existingColumns.includes('instructions')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN instructions TEXT`, (err) => {
+                if (!err) console.log('Feld "instructions" erfolgreich hinzugefügt.');
+            });
+        }
+    });
+});
+
+// Test-Endpunkt zur Überprüfung der Datenbankstruktur
 app.get('/check-db', async (req, res) => {
     db.all('PRAGMA table_info(recipes);', (err, rows) => {
         if (err) {
