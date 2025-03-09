@@ -13,6 +13,38 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log(`✅ Erfolgreich mit SQLite verbunden unter: ${dbPath}`);
 });
 
+// ✅ Datenbank-Erweiterung für neue Felder (nur einmalig notwendig)
+db.serialize(() => {
+    db.all(`PRAGMA table_info(recipes);`, (err, rows) => {
+        const existingColumns = rows.map(row => row.name);
+
+        if (!existingColumns.includes('ingredients')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN ingredients TEXT`, (err) => {
+                if (!err) console.log('✅ Feld "ingredients" erfolgreich hinzugefügt.');
+            });
+        }
+
+        if (!existingColumns.includes('instructions')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN instructions TEXT`, (err) => {
+                if (!err) console.log('✅ Feld "instructions" erfolgreich hinzugefügt.');
+            });
+        }
+    });
+});
+
+// ✅ Test-Endpunkt zur Überprüfung der Datenbankstruktur
+app.get('/check-db', async (req, res) => {
+    db.all('PRAGMA table_info(recipes);', (err, rows) => {
+        if (err) {
+            console.error("❌ Fehler bei der Datenbankabfrage:", err.message);
+            res.status(500).json({ error: 'Fehler beim Überprüfen der Tabelle' });
+            return;
+        }
+        console.log("Tabellenstruktur:", rows);
+        res.json(rows);
+    });
+});
+
 app.use(express.json());
 app.use(cors());
 
