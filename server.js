@@ -7,6 +7,17 @@ const sqlite3 = require("sqlite3").verbose();
 const app = express();  // ← FEHLTE VIELLEICHT!
 const PORT = process.env.PORT || 3000;
 
+//Testing
+app.get('/check-db', async (req, res) => {
+    db.all('PRAGMA table_info(recipes);', (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: 'Fehler beim Überprüfen der Tabelle' });
+            return;
+        }
+        res.json(rows);
+    });
+});
+
 // Middleware
 app.use(express.json());
 app.use(cors());
@@ -64,16 +75,6 @@ const authMiddleware = (req, res, next) => {
         next();
     });
 };
-
-app.get('/check-db', async (req, res) => {
-    db.all('PRAGMA table_info(recipes);', (err, rows) => {
-        if (err) {
-            res.status(500).json({ error: 'Fehler beim Überprüfen der Tabelle' });
-            return;
-        }
-        res.json(rows);
-    });
-});
 
 // ✅ SERVER STARTEN
 const PORT = process.env.PORT || 10000;
