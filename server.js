@@ -65,6 +65,16 @@ const authMiddleware = (req, res, next) => {
     });
 };
 
+app.get('/check-db', async (req, res) => {
+    db.all('PRAGMA table_info(recipes);', (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: 'Fehler beim Überprüfen der Tabelle' });
+            return;
+        }
+        res.json(rows);
+    });
+});
+
 // ✅ SERVER STARTEN
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
