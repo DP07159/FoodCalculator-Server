@@ -119,18 +119,18 @@ app.get("/recipes/:id", (req, res) => {
     });
 });
 
-// 250309 ✅ PUT: Zutaten und Anleitung zu einem Rezept hinzufügen/aktualisieren
+// ✅ PUT: Zutaten und Anleitung zu einem Rezept hinzufügen/aktualisieren
 app.put("/recipes/:id", (req, res) => {
     const { id } = req.params;
-    const { ingredients, instructions } = req.body;
+    const { name, calories, ingredients, instructions } = req.body;
 
-    if (!ingredients || !instructions) {
-        return res.status(400).json({ error: "Zutaten und Anleitung sind erforderlich!" });
+    if (!name || !calories) {
+        return res.status(400).json({ error: "Name und Kalorien sind erforderlich!" });
     }
 
     db.run(
-        "UPDATE recipes SET ingredients = ?, instructions = ? WHERE id = ?",
-        [ingredients, instructions, id],
+        "UPDATE recipes SET name = ?, calories = ?, ingredients = ?, instructions = ? WHERE id = ?",
+        [name, calories, ingredients, instructions, id],
         function (err) {
             if (err) {
                 console.error("❌ Fehler beim Aktualisieren des Rezepts:", err.message);
@@ -141,7 +141,7 @@ app.put("/recipes/:id", (req, res) => {
                 return res.status(404).json({ error: "Rezept nicht gefunden" });
             }
 
-            console.log(`✅ Rezept mit ID ${id} aktualisiert`);
+            console.log(`✅ Rezept mit ID ${id} erfolgreich aktualisiert`);
             res.status(200).json({ message: "Rezept erfolgreich aktualisiert" });
         }
     );
