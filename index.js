@@ -140,10 +140,11 @@ app.get("/recipes/:id", (req, res) => {
         }
 
         if (!recipe) {
+            console.warn(`❗️ Kein Rezept mit ID ${id} gefunden.`);
             return res.status(404).json({ error: "Rezept nicht gefunden" });
         }
 
-        res.json(recipe);
+        res.json(recipe); // ✅ JSON-Antwort
     });
 });
 
