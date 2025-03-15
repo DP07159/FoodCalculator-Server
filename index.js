@@ -13,6 +13,38 @@ const db = new sqlite3.Database(dbPath, (err) => {
   else console.log(`✅ Erfolgreich mit SQLite verbunden unter: ${dbPath}`);
 });
 
+// ✅ Datenbank-Erweiterung für neue Felder (nur einmalig notwendig)
+db.serialize(() => {
+    db.all(`PRAGMA table_info(recipes);`, (err, rows) => {
+        const existingColumns = rows.map(row => row.name);
+
+        if (!existingColumns.includes('ingredients')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN ingredients TEXT`, (err) => {
+                if (!err) console.log('✅ Feld "ingredients" erfolgreich hinzugefügt.');
+            });
+        }
+
+        if (!existingColumns.includes('instructions')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN instructions TEXT`, (err) => {
+                if (!err) console.log('✅ Feld "instructions" erfolgreich hinzugefügt.');
+            });
+        }
+    });
+});
+
+// ✅ Test-Endpunkt zur Überprüfung der Datenbankstruktur
+app.get('/check-db', async (req, res) => {
+    db.all('PRAGMA table_info(recipes);', (err, rows) => {
+        if (err) {
+            console.error("❌ Fehler bei der Datenbankabfrage:", err.message);
+            res.status(500).json({ error: 'Fehler beim Überprüfen der Tabelle' });
+            return;
+        }
+        console.log("Tabellenstruktur:", rows);
+        res.json(rows);
+    });
+});
+
 app.use(express.json());
 app.use(cors());
 
@@ -67,6 +99,52 @@ app.post("/recipes", (req, res) => {
       res.status(201).json({ id: this.lastID, name, calories, mealTypes });
     }
   );
+});
+
+// 250309 ✅ GET: Einzelnes Rezept mit Zutaten und Anleitung abrufen
+app.get("/recipes/:id", (req, res) => {
+    const { id } = req.params;
+
+    db.get("SELECT * FROM recipes WHERE id = ?", [id], (err, recipe) => {
+        if (err) {
+            console.error("❌ Fehler beim Abrufen des Rezepts:", err.message);
+            return res.status(500).json({ error: "Fehler beim Abrufen des Rezepts" });
+        }
+
+        if (!recipe) {
+            return res.status(404).json({ error: "Rezept nicht gefunden" });
+        }
+
+        res.json(recipe);
+    });
+});
+
+// ✅ PUT: Zutaten und Anleitung zu einem Rezept hinzufügen/aktualisieren
+app.put("/recipes/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, calories, ingredients, instructions } = req.body;
+
+    if (!name || !calories) {
+        return res.status(400).json({ error: "Name und Kalorien sind erforderlich!" });
+    }
+
+    db.run(
+        "UPDATE recipes SET name = ?, calories = ?, ingredients = ?, instructions = ? WHERE id = ?",
+        [name, calories, ingredients, instructions, id],
+        function (err) {
+            if (err) {
+                console.error("❌ Fehler beim Aktualisieren des Rezepts:", err.message);
+                return res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
+            }
+
+            if (this.changes === 0) {
+                return res.status(404).json({ error: "Rezept nicht gefunden" });
+            }
+
+            console.log(`✅ Rezept mit ID ${id} erfolgreich aktualisiert`);
+            res.status(200).json({ message: "Rezept erfolgreich aktualisiert" });
+        }
+    );
 });
 
 // **GET: Alle Wochenpläne abrufen**
