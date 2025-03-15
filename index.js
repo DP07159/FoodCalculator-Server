@@ -82,19 +82,19 @@ db.run(
 // **GET: Alle Rezepte abrufen**
 app.get("/recipes", (req, res) => {
     db.all("SELECT * FROM recipes", [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+        if (err) {
+            console.error("❌ Fehler beim Abrufen der Rezepte:", err.message);
+            return res.status(500).json({ error: "Fehler beim Abrufen der Rezepte" });
+        }
 
-        const formattedRecipes = rows.map((recipe) => ({
-            id: recipe.id,
-            name: recipe.name,
-            calories: recipe.calories,
-            portions: recipe.portions, // ➡️ Portionsangabe hinzugefügt
-            mealTypes: JSON.parse(recipe.mealTypes)
-        }));
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ error: "Keine Rezepte gefunden" });
+        }
 
-        res.json(formattedRecipes);
+        res.json(rows); // ✅ Nur JSON senden, kein res.send()
     });
 });
+
 
 // **POST: Neues Rezept hinzufügen**
 app.post("/recipes", (req, res) => {
@@ -112,6 +112,21 @@ app.post("/recipes", (req, res) => {
             res.status(201).json({ id: this.lastID, name, calories, mealTypes, portions });
         }
     );
+});
+
+app.get("/meal_plans", (req, res) => {
+    db.all("SELECT * FROM meal_plans", [], (err, rows) => {
+        if (err) {
+            console.error("❌ Fehler beim Abrufen der Wochenpläne:", err.message);
+            return res.status(500).json({ error: "Fehler beim Abrufen der Wochenpläne" });
+        }
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ error: "Keine Wochenpläne gefunden" });
+        }
+
+        res.json(rows); // ✅ Nur JSON senden, kein res.send()
+    });
 });
 
 // ✅ GET: Einzelnes Rezept mit allen Details abrufen
