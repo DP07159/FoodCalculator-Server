@@ -16,6 +16,11 @@ const db = new sqlite3.Database(dbPath, (err) => {
 // ✅ Datenbank-Erweiterung für neue Felder (nur einmalig notwendig)
 db.serialize(() => {
     db.get(`PRAGMA table_info(recipes);`, (err, rows) => {
+        if (err || !Array.isArray(rows)) {
+            console.error("❌ Fehler beim Abrufen der Tabellenstruktur:", err || "Ungültiges Format");
+            return;
+        }
+
         const existingColumns = rows.map(row => row.name);
 
         if (!existingColumns.includes('ingredients')) {
