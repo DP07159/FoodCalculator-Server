@@ -129,6 +129,31 @@ app.get("/meal_plans", (req, res) => {
     });
 });
 
+// ✅ GET: Einzelnen Wochenplan abrufen
+app.get("/meal_plans/:id", (req, res) => {
+    const { id } = req.params;
+
+    db.get("SELECT * FROM meal_plans WHERE id = ?", [id], (err, row) => {
+        if (err) {
+            console.error("❌ Fehler beim Abrufen des Wochenplans:", err.message);
+            return res.status(500).json({ error: "Fehler beim Abrufen des Wochenplans" });
+        }
+
+        if (!row) {
+            console.warn(`❗️ Kein Wochenplan mit ID ${id} gefunden.`);
+            return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+        }
+
+        try {
+            const planData = JSON.parse(row.data); // JSON korrekt parsen
+            res.json({ id: row.id, name: row.name, data: planData });
+        } catch (parseError) {
+            console.error("❌ Fehler beim JSON-Parsing des Wochenplans:", parseError.message);
+            res.status(500).json({ error: "Fehler beim Verarbeiten des Wochenplans" });
+        }
+    });
+});
+
 // ✅ GET: Einzelnes Rezept mit allen Details abrufen
 app.get("/recipes/:id", (req, res) => {
     const { id } = req.params;
