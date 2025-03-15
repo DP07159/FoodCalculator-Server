@@ -9,13 +9,13 @@ const PORT = process.env.PORT || 3000;
 // **Persistente SQLite-Datenbank speichern**
 const dbPath = path.join("/var/data", "food_calculator.sqlite");
 const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error("❌ Fehler beim Öffnen der Datenbank:", err.message);
-  else console.log(`✅ Erfolgreich mit SQLite verbunden unter: ${dbPath}`);
+    if (err) console.error("❌ Fehler beim Öffnen der Datenbank:", err.message);
+    else console.log(`✅ Erfolgreich mit SQLite verbunden unter: ${dbPath}`);
 });
 
 // ✅ Datenbank-Erweiterung für neue Felder (nur einmalig notwendig)
 db.serialize(() => {
-    db.all(`PRAGMA table_info(recipes);`, (err, rows) => {
+    db.get(`PRAGMA table_info(recipes);`, (err, rows) => {
         const existingColumns = rows.map(row => row.name);
 
         if (!existingColumns.includes('ingredients')) {
@@ -29,12 +29,6 @@ db.serialize(() => {
                 if (!err) console.log('✅ Feld "instructions" erfolgreich hinzugefügt.');
             });
         }
-    });
-});
-
-db.serialize(() => {
-    db.get(`PRAGMA table_info(recipes);`, (err, rows) => {
-        const existingColumns = rows.map(row => row.name);
 
         if (!existingColumns.includes('portions')) {
             db.run(`ALTER TABLE recipes ADD COLUMN portions INTEGER`, (err) => {
@@ -66,7 +60,8 @@ db.run(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     calories INTEGER NOT NULL,
-    mealTypes TEXT NOT NULL
+    mealTypes TEXT NOT NULL,
+    portions INTEGER
   )`
 );
 
@@ -81,39 +76,40 @@ db.run(
 
 // **GET: Alle Rezepte abrufen**
 app.get("/recipes", (req, res) => {
-  db.all("SELECT * FROM recipes", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
+    db.all("SELECT * FROM recipes", [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
 
-    const formattedRecipes = rows.map((recipe) => ({
-      id: recipe.id,
-      name: recipe.name,
-      calories: recipe.calories,
-      mealTypes: JSON.parse(recipe.mealTypes)
-    }));
+        const formattedRecipes = rows.map((recipe) => ({
+            id: recipe.id,
+            name: recipe.name,
+            calories: recipe.calories,
+            portions: recipe.portions, // ➡️ Portionsangabe hinzugefügt
+            mealTypes: JSON.parse(recipe.mealTypes)
+        }));
 
-    res.json(formattedRecipes);
-  });
+        res.json(formattedRecipes);
+    });
 });
 
 // **POST: Neues Rezept hinzufügen**
 app.post("/recipes", (req, res) => {
-  const { name, calories, mealTypes } = req.body;
-  if (!name || !calories || !mealTypes) {
-    return res.status(400).json({ error: "Alle Felder sind erforderlich!" });
-  }
-
-  const mealTypesJSON = JSON.stringify(mealTypes);
-  db.run(
-    "INSERT INTO recipes (name, calories, mealTypes) VALUES (?, ?, ?)",
-    [name, calories, mealTypesJSON],
-    function (err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, name, calories, mealTypes });
+    const { name, calories, mealTypes, portions } = req.body;
+    if (!name || !calories || !mealTypes) {
+        return res.status(400).json({ error: "Alle Felder sind erforderlich!" });
     }
-  );
+
+    const mealTypesJSON = JSON.stringify(mealTypes);
+    db.run(
+        "INSERT INTO recipes (name, calories, mealTypes, portions) VALUES (?, ?, ?, ?)",
+        [name, calories, mealTypesJSON, portions],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.status(201).json({ id: this.lastID, name, calories, mealTypes, portions });
+        }
+    );
 });
 
-// 250309 ✅ GET: Einzelnes Rezept mit Zutaten und Anleitung abrufen
+// ✅ GET: Einzelnes Rezept mit allen Details abrufen
 app.get("/recipes/:id", (req, res) => {
     const { id } = req.params;
 
@@ -131,18 +127,18 @@ app.get("/recipes/:id", (req, res) => {
     });
 });
 
-// ✅ PUT: Zutaten und Anleitung zu einem Rezept hinzufügen/aktualisieren
+// ✅ PUT: Rezept aktualisieren
 app.put("/recipes/:id", (req, res) => {
     const { id } = req.params;
-    const { name, calories, ingredients, instructions } = req.body;
+    const { name, calories, portions, ingredients, instructions } = req.body;
 
     if (!name || !calories) {
         return res.status(400).json({ error: "Name und Kalorien sind erforderlich!" });
     }
 
     db.run(
-        "UPDATE recipes SET name = ?, calories = ?, ingredients = ?, instructions = ? WHERE id = ?",
-        [name, calories, ingredients, instructions, id],
+        "UPDATE recipes SET name = ?, calories = ?, portions = ?, ingredients = ?, instructions = ? WHERE id = ?",
+        [name, calories, portions, ingredients, instructions, id],
         function (err) {
             if (err) {
                 console.error("❌ Fehler beim Aktualisieren des Rezepts:", err.message);
@@ -159,123 +155,25 @@ app.put("/recipes/:id", (req, res) => {
     );
 });
 
-// **GET: Alle Wochenpläne abrufen**
-app.get("/meal_plans", (req, res) => {
-  db.all("SELECT * FROM meal_plans", [], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-
-    res.json(rows);
-  });
-});
-
-// **POST: Wochenplan speichern**
-app.post("/meal_plans", (req, res) => {
-  const { name, data } = req.body;
-  if (!name || !data) {
-    return res.status(400).json({ error: "Name und Daten sind erforderlich!" });
-  }
-
-  const jsonData = JSON.stringify(data);
-  db.run(
-    "INSERT INTO meal_plans (name, data) VALUES (?, ?)",
-    [name, jsonData],
-    function (err) {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, name, data });
-    }
-  );
-});
-
-// **GET: Einzelnen Wochenplan abrufen**
-app.get("/meal_plans/:id", (req, res) => {
-  const { id } = req.params;
-  
-  db.get("SELECT * FROM meal_plans WHERE id = ?", [id], (err, row) => {
-    if (err) {
-      console.error("❌ Fehler beim Laden des Plans:", err.message);
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (!row) {
-      return res.status(404).json({ error: "Plan nicht gefunden" });
-    }
-
-    try {
-      const planData = JSON.parse(row.data); // JSON korrekt parsen
-      res.json({ id: row.id, name: row.name, data: planData });
-    } catch (parseError) {
-      console.error("❌ Fehler beim JSON-Parsing des Plans:", parseError.message);
-      res.status(500).json({ error: "Fehler beim Verarbeiten des Plans" });
-    }
-  });
-});
-
-// **DELETE: Wochenplan löschen**
-app.delete("/meal_plans/:id", (req, res) => {
-  const { id } = req.params;
-
-  db.run("DELETE FROM meal_plans WHERE id = ?", [id], function (err) {
-    if (err) {
-      console.error("❌ Fehler beim Löschen des Wochenplans:", err.message);
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (this.changes === 0) {
-      return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-    }
-
-    console.log(`✅ Wochenplan mit ID ${id} gelöscht`);
-    res.status(200).json({ message: "Wochenplan erfolgreich gelöscht" });
-  });
-});
-
-// **PUT: Wochenplan aktualisieren**
-app.put("/meal_plans/:id", (req, res) => {
-  const { id } = req.params;
-  const { name, data } = req.body;
-
-  if (!name || !data) {
-    return res.status(400).json({ error: "Name und Daten sind erforderlich!" });
-  }
-
-  const jsonData = JSON.stringify(data);
-  db.run(
-    "UPDATE meal_plans SET name = ?, data = ? WHERE id = ?",
-    [name, jsonData, id],
-    function (err) {
-      if (err) {
-        console.error("❌ Fehler beim Aktualisieren des Wochenplans:", err.message);
-        return res.status(500).json({ error: err.message });
-      }
-
-      if (this.changes === 0) {
-        return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-      }
-
-      console.log(`✅ Wochenplan mit ID ${id} aktualisiert`);
-      res.status(200).json({ message: "Wochenplan erfolgreich aktualisiert" });
-    }
-  );
-});
-
 // **DELETE: Rezept löschen**
 app.delete("/recipes/:id", (req, res) => {
-  const { id } = req.params;
+    const { id } = req.params;
 
-  db.run("DELETE FROM recipes WHERE id = ?", [id], function (err) {
-    if (err) {
-      console.error("❌ Fehler beim Löschen des Rezepts:", err.message);
-      return res.status(500).json({ error: err.message });
-    }
+    db.run("DELETE FROM recipes WHERE id = ?", [id], function (err) {
+        if (err) {
+            console.error("❌ Fehler beim Löschen des Rezepts:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
 
-    if (this.changes === 0) {
-      return res.status(404).json({ error: "Rezept nicht gefunden" });
-    }
+        if (this.changes === 0) {
+            return res.status(404).json({ error: "Rezept nicht gefunden" });
+        }
 
-    console.log(`✅ Rezept mit ID ${id} erfolgreich gelöscht`);
-    res.status(200).json({ message: "Rezept erfolgreich gelöscht" });
-  });
+        console.log(`✅ Rezept mit ID ${id} erfolgreich gelöscht`);
+        res.status(200).json({ message: "Rezept erfolgreich gelöscht" });
+    });
 });
 
 // **Server starten**
 app.listen(PORT, () => console.log(`🚀 Server läuft auf Port ${PORT}`));
+
