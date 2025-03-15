@@ -32,6 +32,18 @@ db.serialize(() => {
     });
 });
 
+db.serialize(() => {
+    db.get(`PRAGMA table_info(recipes);`, (err, rows) => {
+        const existingColumns = rows.map(row => row.name);
+
+        if (!existingColumns.includes('portions')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN portions INTEGER`, (err) => {
+                if (!err) console.log('✅ Feld "portions" erfolgreich hinzugefügt.');
+            });
+        }
+    });
+});
+
 // ✅ Test-Endpunkt zur Überprüfung der Datenbankstruktur
 app.get('/check-db', async (req, res) => {
     db.all('PRAGMA table_info(recipes);', (err, rows) => {
