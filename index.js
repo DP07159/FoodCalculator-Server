@@ -120,17 +120,18 @@ app.get("/recipes/:id", (req, res) => {
 });
 
 // ✅ PUT: Zutaten und Anleitung zu einem Rezept hinzufügen/aktualisieren
+// ✅ PUT: Rezept aktualisieren
 app.put("/recipes/:id", (req, res) => {
     const { id } = req.params;
-    const { name, calories, ingredients, instructions } = req.body;
+    const { name, calories, portions, ingredients, instructions } = req.body;
 
     if (!name || !calories) {
         return res.status(400).json({ error: "Name und Kalorien sind erforderlich!" });
     }
 
     db.run(
-        "UPDATE recipes SET name = ?, calories = ?, ingredients = ?, instructions = ? WHERE id = ?",
-        [name, calories, ingredients, instructions, id],
+        "UPDATE recipes SET name = ?, calories = ?, portions = ?, ingredients = ?, instructions = ? WHERE id = ?",
+        [name, calories, portions, ingredients, instructions, id],  // 🟢 Hier wurde `portions` ergänzt
         function (err) {
             if (err) {
                 console.error("❌ Fehler beim Aktualisieren des Rezepts:", err.message);
