@@ -24,6 +24,12 @@ db.serialize(() => {
             });
         }
 
+        if (!existingColumns.includes('portions')) {
+            db.run(`ALTER TABLE recipes ADD COLUMN portions INTEGER`, (err) => {
+                if (!err) console.log('✅ Feld "portions" erfolgreich hinzugefügt.');
+            });
+        }
+
         if (!existingColumns.includes('instructions')) {
             db.run(`ALTER TABLE recipes ADD COLUMN instructions TEXT`, (err) => {
                 if (!err) console.log('✅ Feld "instructions" erfolgreich hinzugefügt.');
