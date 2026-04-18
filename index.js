@@ -91,18 +91,18 @@ app.get("/recipes", (req, res) => {
 
 // **POST: Neues Rezept hinzufügen**
 app.post("/recipes", (req, res) => {
-  const { name, calories, mealTypes } = req.body;
+  const { name, calories, portions, mealTypes } = req.body;
   if (!name || !calories || !mealTypes) {
     return res.status(400).json({ error: "Alle Felder sind erforderlich!" });
   }
 
   const mealTypesJSON = JSON.stringify(mealTypes);
   db.run(
-    "INSERT INTO recipes (name, calories, mealTypes) VALUES (?, ?, ?)",
-    [name, calories, mealTypesJSON],
+    "INSERT INTO recipes (name, calories, portions, mealTypes) VALUES (?, ?, ?)",
+    [name, calories, portions, mealTypesJSON],
     function (err) {
       if (err) return res.status(500).json({ error: err.message });
-      res.status(201).json({ id: this.lastID, name, calories, mealTypes });
+      res.status(201).json({ id: this.lastID, name, calories, portions, mealTypes });
     }
   );
 });
