@@ -98,7 +98,7 @@ app.post("/recipes", (req, res) => {
 
   const mealTypesJSON = JSON.stringify(mealTypes);
   db.run(
-    "INSERT INTO recipes (name, calories, portions, mealTypes) VALUES (?, ?, ?)",
+    "INSERT INTO recipes (name, calories, portions, mealTypes) VALUES (?, ?, ?, ?)",
     [name, calories, portions, mealTypesJSON],
     function (err) {
       if (err) return res.status(500).json({ error: err.message });
