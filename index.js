@@ -8,25 +8,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
-
-/* -------------------------------------- */
-/* DATENBANK */
-/* -------------------------------------- */
+app.use(express.json({ limit: "2mb" }));
 
 const dataDir = "/var/data";
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-}
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const dbPath = path.join(dataDir, "food_calculator.sqlite");
-
 const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-        console.error("❌ Fehler beim Öffnen der Datenbank:", err.message);
-    } else {
-        console.log(`✅ Erfolgreich mit SQLite verbunden unter: ${dbPath}`);
-    }
+    if (err) console.error("Fehler beim Öffnen der Datenbank:", err.message);
+    else console.log(`SQLite verbunden: ${dbPath}`);
 });
 
 function run(sql, params = []) {
@@ -56,15 +46,33 @@ function all(sql, params = []) {
     });
 }
 
+async function addColumnIfMissing(tableName, columnName, definition) {
+    const columns = await all(`PRAGMA table_info(${tableName})`);
+    const existingColumns = columns.map(column => column.name);
+    if (!existingColumns.includes(columnName)) {
+        await run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+        console.log(`Spalte ergänzt: ${tableName}.${columnName}`);
+    }
+}
+
 async function ensureSchema() {
     await run(`
         CREATE TABLE IF NOT EXISTS recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             calories INTEGER NOT NULL,
-            mealTypes TEXT NOT NULL
+            portions INTEGER,
+            mealTypes TEXT NOT NULL,
+            ingredients TEXT DEFAULT '',
+            instructions TEXT DEFAULT '',
+            is_favorite INTEGER DEFAULT 0
         )
     `);
+
+    await addColumnIfMissing("recipes", "ingredients", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipes", "instructions", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipes", "portions", "INTEGER");
+    await addColumnIfMissing("recipes", "is_favorite", "INTEGER DEFAULT 0");
 
     await run(`
         CREATE TABLE IF NOT EXISTS meal_plans (
@@ -73,40 +81,15 @@ async function ensureSchema() {
             data TEXT NOT NULL
         )
     `);
-
-    const recipeColumns = await all(`PRAGMA table_info(recipes)`);
-
-    const existingColumns = recipeColumns.map((column) => column.name);
-
-    if (!existingColumns.includes("ingredients")) {
-        await run(`ALTER TABLE recipes ADD COLUMN ingredients TEXT`);
-        console.log('✅ Feld "ingredients" erfolgreich hinzugefügt.');
-    }
-
-    if (!existingColumns.includes("instructions")) {
-        await run(`ALTER TABLE recipes ADD COLUMN instructions TEXT`);
-        console.log('✅ Feld "instructions" erfolgreich hinzugefügt.');
-    }
-
-    if (!existingColumns.includes("portions")) {
-        await run(`ALTER TABLE recipes ADD COLUMN portions INTEGER`);
-        console.log('✅ Feld "portions" erfolgreich hinzugefügt.');
-    }
-
-if (!existingColumns.includes("is_favorite")) {
-    await run(`ALTER TABLE recipes ADD COLUMN is_favorite INTEGER DEFAULT 0`);
-    console.log('✅ Feld "is_favorite" erfolgreich hinzugefügt.');
-}
 }
 
 function parseMealTypes(value) {
     if (!value) return [];
-
+    if (Array.isArray(value)) return value;
     try {
         const parsed = JSON.parse(value);
         return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-        console.warn("⚠️ mealTypes konnten nicht geparsed werden:", value);
+    } catch {
         return [];
     }
 }
@@ -115,187 +98,164 @@ function normalizeRecipeRow(recipe) {
     return {
         id: recipe.id,
         name: recipe.name,
-        calories: recipe.calories,
+        calories: Number(recipe.calories) || 0,
         portions: recipe.portions ?? null,
         mealTypes: parseMealTypes(recipe.mealTypes),
         ingredients: recipe.ingredients || "",
         instructions: recipe.instructions || "",
-        is_favorite: recipe.is_favorite || 0
+        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
     };
 }
 
-function isPositiveInteger(value) {
-    return Number.isInteger(value) && value > 0;
+function normalizePlanRow(plan) {
+    let data = [];
+    try { data = JSON.parse(plan.data || "[]"); } catch { data = []; }
+    return { id: plan.id, name: plan.name, data };
 }
 
-/* -------------------------------------- */
-/* DEBUG / HEALTH */
-/* -------------------------------------- */
+function toPositiveInteger(value) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function validateRecipePayload(payload, { allowEmptyPortions = false } = {}) {
+    const name = typeof payload.name === "string" ? payload.name.trim() : "";
+    const calories = toPositiveInteger(payload.calories);
+    const portions = payload.portions === "" || payload.portions === null || payload.portions === undefined
+        ? null
+        : toPositiveInteger(payload.portions);
+    const mealTypes = Array.isArray(payload.mealTypes) ? payload.mealTypes : [];
+
+    if (!name) return { error: "Name ist erforderlich." };
+    if (!calories) return { error: "Kalorien müssen als ganze Zahl größer 0 angegeben werden." };
+    if (!allowEmptyPortions && !portions) return { error: "Portionen müssen als ganze Zahl größer 0 angegeben werden." };
+    if (mealTypes.length === 0 && payload.mealTypes !== undefined) return { error: "Mindestens eine Mahlzeit muss ausgewählt werden." };
+
+    return {
+        value: {
+            name,
+            calories,
+            portions,
+            mealTypes,
+            ingredients: typeof payload.ingredients === "string" ? payload.ingredients : "",
+            instructions: typeof payload.instructions === "string" ? payload.instructions : "",
+            is_favorite: Number(payload.is_favorite) === 1 ? 1 : 0
+        }
+    };
+}
+
+app.get("/", (req, res) => res.json({ status: "ok", service: "Food Calculator API" }));
 
 app.get("/check-db", async (req, res) => {
     try {
-        const rows = await all(`PRAGMA table_info(recipes)`);
-        res.json(rows);
+        const recipes = await all(`PRAGMA table_info(recipes)`);
+        const mealPlans = await all(`PRAGMA table_info(meal_plans)`);
+        res.json({ recipes, mealPlans });
     } catch (error) {
-        console.error("❌ Fehler bei /check-db:", error.message);
-        res.status(500).json({ error: "Fehler beim Überprüfen der Tabelle" });
+        res.status(500).json({ error: error.message });
     }
 });
-
-/* -------------------------------------- */
-/* REZEPTE */
-/* -------------------------------------- */
 
 app.get("/recipes", async (req, res) => {
     try {
         const rows = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
         res.json(rows.map(normalizeRecipeRow));
     } catch (error) {
-        console.error("❌ Fehler beim Laden der Rezepte:", error.message);
+        console.error("Fehler bei GET /recipes:", error.message);
         res.status(500).json({ error: "Fehler beim Laden der Rezepte" });
     }
 });
 
 app.get("/recipes/:id", async (req, res) => {
     try {
-        const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-
-        if (!recipe) {
-            return res.status(404).json({ error: "Rezept nicht gefunden" });
-        }
-
-        res.json(normalizeRecipeRow(recipe));
+        const row = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        if (!row) return res.status(404).json({ error: "Rezept nicht gefunden" });
+        res.json(normalizeRecipeRow(row));
     } catch (error) {
-        console.error("❌ Fehler beim Abrufen des Rezepts:", error.message);
-        res.status(500).json({ error: "Fehler beim Abrufen des Rezepts" });
+        console.error("Fehler bei GET /recipes/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Rezepts" });
     }
 });
 
 app.post("/recipes", async (req, res) => {
     try {
-        const { name, calories, portions, mealTypes } = req.body;
-
-        const trimmedName = typeof name === "string" ? name.trim() : "";
-        const parsedCalories = Number.parseInt(calories, 10);
-        const parsedPortions = Number.parseInt(portions, 10);
-
-        if (!trimmedName) {
-            return res.status(400).json({ error: "Name ist erforderlich." });
-        }
-
-        if (!isPositiveInteger(parsedCalories)) {
-            return res.status(400).json({ error: "Kalorien müssen als ganze Zahl größer 0 angegeben werden." });
-        }
-
-        if (!isPositiveInteger(parsedPortions)) {
-            return res.status(400).json({ error: "Anzahl Mahlzeiten muss als ganze Zahl größer 0 angegeben werden." });
-        }
-
-        if (!Array.isArray(mealTypes) || mealTypes.length === 0) {
-            return res.status(400).json({ error: "Mindestens eine Mahlzeit muss ausgewählt werden." });
-        }
-
-        const mealTypesJSON = JSON.stringify(mealTypes);
+        const validation = validateRecipePayload(req.body);
+        if (validation.error) return res.status(400).json({ error: validation.error });
+        const recipe = validation.value;
 
         const result = await run(
-            `
-            INSERT INTO recipes (name, calories, portions, mealTypes)
-            VALUES (?, ?, ?, ?)
-            `,
-            [trimmedName, parsedCalories, parsedPortions, mealTypesJSON]
+            `INSERT INTO recipes (name, calories, portions, mealTypes, ingredients, instructions, is_favorite)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                recipe.name,
+                recipe.calories,
+                recipe.portions,
+                JSON.stringify(recipe.mealTypes),
+                recipe.ingredients,
+                recipe.instructions,
+                recipe.is_favorite
+            ]
         );
 
-        res.status(201).json({
-            id: result.lastID,
-            name: trimmedName,
-            calories: parsedCalories,
-            portions: parsedPortions,
-            mealTypes
-        });
+        const created = await get(`SELECT * FROM recipes WHERE id = ?`, [result.lastID]);
+        res.status(201).json(normalizeRecipeRow(created));
     } catch (error) {
-        console.error("❌ Fehler beim Speichern des Rezepts:", error.message);
+        console.error("Fehler bei POST /recipes:", error.message);
         res.status(500).json({ error: "Fehler beim Speichern des Rezepts" });
     }
 });
 
 app.put("/recipes/:id", async (req, res) => {
     try {
-        const { id } = req.params;
-        const { name, calories, portions, ingredients, instructions } = req.body;
+        const current = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        if (!current) return res.status(404).json({ error: "Rezept nicht gefunden" });
 
-        const trimmedName = typeof name === "string" ? name.trim() : "";
-        const parsedCalories = Number.parseInt(calories, 10);
-        const parsedPortions =
-            portions === null || portions === undefined || portions === ""
-                ? null
-                : Number.parseInt(portions, 10);
+        const validation = validateRecipePayload({
+            ...req.body,
+            mealTypes: req.body.mealTypes ?? parseMealTypes(current.mealTypes)
+        }, { allowEmptyPortions: true });
+        if (validation.error) return res.status(400).json({ error: validation.error });
+        const recipe = validation.value;
 
-        if (!trimmedName) {
-            return res.status(400).json({ error: "Name ist erforderlich." });
-        }
+        const favoriteValue = req.body.is_favorite === undefined
+            ? Number(current.is_favorite) || 0
+            : recipe.is_favorite;
 
-        if (!isPositiveInteger(parsedCalories)) {
-            return res.status(400).json({ error: "Kalorien müssen als ganze Zahl größer 0 angegeben werden." });
-        }
-
-        if (parsedPortions !== null && !isPositiveInteger(parsedPortions)) {
-            return res.status(400).json({ error: "Portionen müssen leer oder eine ganze Zahl größer 0 sein." });
-        }
-
-        const result = await run(
-            `
-            UPDATE recipes
-            SET name = ?, calories = ?, portions = ?, ingredients = ?, instructions = ?
-            WHERE id = ?
-            `,
+        await run(
+            `UPDATE recipes
+             SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?
+             WHERE id = ?`,
             [
-                trimmedName,
-                parsedCalories,
-                parsedPortions,
-                ingredients || "",
-                instructions || "",
-                id
+                recipe.name,
+                recipe.calories,
+                recipe.portions,
+                JSON.stringify(recipe.mealTypes),
+                recipe.ingredients,
+                recipe.instructions,
+                favoriteValue,
+                req.params.id
             ]
         );
 
-        if (result.changes === 0) {
-            return res.status(404).json({ error: "Rezept nicht gefunden" });
-        }
-
-        res.status(200).json({ message: "Rezept erfolgreich aktualisiert" });
+        const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        res.json(normalizeRecipeRow(updated));
     } catch (error) {
-        console.error("❌ Fehler beim Aktualisieren des Rezepts:", error.message);
+        console.error("Fehler bei PUT /recipes/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
     }
 });
 
 app.patch("/recipes/:id/favorite", async (req, res) => {
     try {
-        const { id } = req.params;
-        const { is_favorite } = req.body;
-
-        const favoriteValue = Number(is_favorite) === 1 ? 1 : 0;
-
+        const favoriteValue = Number(req.body.is_favorite) === 1 ? 1 : 0;
         const result = await run(
-            `
-            UPDATE recipes
-            SET is_favorite = ?
-            WHERE id = ?
-            `,
-            [favoriteValue, id]
+            `UPDATE recipes SET is_favorite = ? WHERE id = ?`,
+            [favoriteValue, req.params.id]
         );
-
-        if (result.changes === 0) {
-            return res.status(404).json({ error: "Rezept nicht gefunden" });
-        }
-
-        res.status(200).json({
-            message: "Favoritenstatus erfolgreich aktualisiert",
-            id,
-            is_favorite: favoriteValue
-        });
+        if (result.changes === 0) return res.status(404).json({ error: "Rezept nicht gefunden" });
+        res.json({ id: Number(req.params.id), is_favorite: favoriteValue });
     } catch (error) {
-        console.error("❌ Fehler beim Aktualisieren des Favoritenstatus:", error.message);
+        console.error("Fehler bei PATCH /recipes/:id/favorite:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Favoritenstatus" });
     }
 });
@@ -303,28 +263,20 @@ app.patch("/recipes/:id/favorite", async (req, res) => {
 app.delete("/recipes/:id", async (req, res) => {
     try {
         const result = await run(`DELETE FROM recipes WHERE id = ?`, [req.params.id]);
-
-        if (result.changes === 0) {
-            return res.status(404).json({ error: "Rezept nicht gefunden" });
-        }
-
-        res.status(200).json({ message: "Rezept erfolgreich gelöscht" });
+        if (result.changes === 0) return res.status(404).json({ error: "Rezept nicht gefunden" });
+        res.json({ success: true });
     } catch (error) {
-        console.error("❌ Fehler beim Löschen des Rezepts:", error.message);
+        console.error("Fehler bei DELETE /recipes/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Löschen des Rezepts" });
     }
 });
 
-/* -------------------------------------- */
-/* WOCHENPLÄNE */
-/* -------------------------------------- */
-
 app.get("/meal_plans", async (req, res) => {
     try {
         const rows = await all(`SELECT * FROM meal_plans ORDER BY id DESC`);
-        res.json(rows);
+        res.json(rows.map(normalizePlanRow));
     } catch (error) {
-        console.error("❌ Fehler beim Laden der Wochenpläne:", error.message);
+        console.error("Fehler bei GET /meal_plans:", error.message);
         res.status(500).json({ error: "Fehler beim Laden der Wochenpläne" });
     }
 });
@@ -332,76 +284,41 @@ app.get("/meal_plans", async (req, res) => {
 app.get("/meal_plans/:id", async (req, res) => {
     try {
         const row = await get(`SELECT * FROM meal_plans WHERE id = ?`, [req.params.id]);
-
-        if (!row) {
-            return res.status(404).json({ error: "Plan nicht gefunden" });
-        }
-
-        let parsedData = [];
-        try {
-            parsedData = JSON.parse(row.data);
-        } catch (parseError) {
-            console.error("❌ Fehler beim JSON-Parsing des Plans:", parseError.message);
-            return res.status(500).json({ error: "Fehler beim Verarbeiten des Plans" });
-        }
-
-        res.json({
-            id: row.id,
-            name: row.name,
-            data: parsedData
-        });
+        if (!row) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+        res.json(normalizePlanRow(row));
     } catch (error) {
-        console.error("❌ Fehler beim Laden des Plans:", error.message);
-        res.status(500).json({ error: "Fehler beim Laden des Plans" });
+        console.error("Fehler bei GET /meal_plans/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Wochenplans" });
     }
 });
 
 app.post("/meal_plans", async (req, res) => {
     try {
-        const { name, data } = req.body;
-        const trimmedName = typeof name === "string" ? name.trim() : "";
+        const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+        const data = Array.isArray(req.body.data) ? req.body.data : null;
+        if (!name || !data) return res.status(400).json({ error: "Name und Daten sind erforderlich." });
 
-        if (!trimmedName || !Array.isArray(data)) {
-            return res.status(400).json({ error: "Name und Daten sind erforderlich." });
-        }
-
-        const result = await run(
-            `INSERT INTO meal_plans (name, data) VALUES (?, ?)`,
-            [trimmedName, JSON.stringify(data)]
-        );
-
-        res.status(201).json({
-            id: result.lastID,
-            name: trimmedName,
-            data
-        });
+        const result = await run(`INSERT INTO meal_plans (name, data) VALUES (?, ?)`, [name, JSON.stringify(data)]);
+        const created = await get(`SELECT * FROM meal_plans WHERE id = ?`, [result.lastID]);
+        res.status(201).json(normalizePlanRow(created));
     } catch (error) {
-        console.error("❌ Fehler beim Speichern des Wochenplans:", error.message);
+        console.error("Fehler bei POST /meal_plans:", error.message);
         res.status(500).json({ error: "Fehler beim Speichern des Wochenplans" });
     }
 });
 
 app.put("/meal_plans/:id", async (req, res) => {
     try {
-        const { name, data } = req.body;
-        const trimmedName = typeof name === "string" ? name.trim() : "";
+        const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+        const data = Array.isArray(req.body.data) ? req.body.data : null;
+        if (!name || !data) return res.status(400).json({ error: "Name und Daten sind erforderlich." });
 
-        if (!trimmedName || !Array.isArray(data)) {
-            return res.status(400).json({ error: "Name und Daten sind erforderlich." });
-        }
-
-        const result = await run(
-            `UPDATE meal_plans SET name = ?, data = ? WHERE id = ?`,
-            [trimmedName, JSON.stringify(data), req.params.id]
-        );
-
-        if (result.changes === 0) {
-            return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-        }
-
-        res.status(200).json({ message: "Wochenplan erfolgreich aktualisiert" });
+        const result = await run(`UPDATE meal_plans SET name = ?, data = ? WHERE id = ?`, [name, JSON.stringify(data), req.params.id]);
+        if (result.changes === 0) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+        const updated = await get(`SELECT * FROM meal_plans WHERE id = ?`, [req.params.id]);
+        res.json(normalizePlanRow(updated));
     } catch (error) {
-        console.error("❌ Fehler beim Aktualisieren des Wochenplans:", error.message);
+        console.error("Fehler bei PUT /meal_plans/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Wochenplans" });
     }
 });
@@ -409,29 +326,19 @@ app.put("/meal_plans/:id", async (req, res) => {
 app.delete("/meal_plans/:id", async (req, res) => {
     try {
         const result = await run(`DELETE FROM meal_plans WHERE id = ?`, [req.params.id]);
-
-        if (result.changes === 0) {
-            return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-        }
-
-        res.status(200).json({ message: "Wochenplan erfolgreich gelöscht" });
+        if (result.changes === 0) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
+        res.json({ success: true });
     } catch (error) {
-        console.error("❌ Fehler beim Löschen des Wochenplans:", error.message);
+        console.error("Fehler bei DELETE /meal_plans/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Löschen des Wochenplans" });
     }
 });
 
-/* -------------------------------------- */
-/* SERVER START */
-/* -------------------------------------- */
-
 ensureSchema()
     .then(() => {
-        app.listen(PORT, () => {
-            console.log(`🚀 Server läuft auf Port ${PORT}`);
-        });
+        app.listen(PORT, () => console.log(`Food Calculator API läuft auf Port ${PORT}`));
     })
     .catch((error) => {
-        console.error("❌ Fehler beim Initialisieren der Datenbank:", error.message);
+        console.error("Datenbankinitialisierung fehlgeschlagen:", error.message);
         process.exit(1);
     });
