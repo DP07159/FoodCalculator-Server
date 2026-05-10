@@ -92,6 +92,11 @@ async function ensureSchema() {
         await run(`ALTER TABLE recipes ADD COLUMN portions INTEGER`);
         console.log('✅ Feld "portions" erfolgreich hinzugefügt.');
     }
+
+if (!existingColumns.includes("is_favorite")) {
+    await run(`ALTER TABLE recipes ADD COLUMN is_favorite INTEGER DEFAULT 0`);
+    console.log('✅ Feld "is_favorite" erfolgreich hinzugefügt.');
+}
 }
 
 function parseMealTypes(value) {
@@ -114,7 +119,8 @@ function normalizeRecipeRow(recipe) {
         portions: recipe.portions ?? null,
         mealTypes: parseMealTypes(recipe.mealTypes),
         ingredients: recipe.ingredients || "",
-        instructions: recipe.instructions || ""
+        instructions: recipe.instructions || "",
+        is_favorite: recipe.is_favorite || 0
     };
 }
 
@@ -260,6 +266,37 @@ app.put("/recipes/:id", async (req, res) => {
     } catch (error) {
         console.error("❌ Fehler beim Aktualisieren des Rezepts:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
+    }
+});
+
+app.patch("/recipes/:id/favorite", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { is_favorite } = req.body;
+
+        const favoriteValue = Number(is_favorite) === 1 ? 1 : 0;
+
+        const result = await run(
+            `
+            UPDATE recipes
+            SET is_favorite = ?
+            WHERE id = ?
+            `,
+            [favoriteValue, id]
+        );
+
+        if (result.changes === 0) {
+            return res.status(404).json({ error: "Rezept nicht gefunden" });
+        }
+
+        res.status(200).json({
+            message: "Favoritenstatus erfolgreich aktualisiert",
+            id,
+            is_favorite: favoriteValue
+        });
+    } catch (error) {
+        console.error("❌ Fehler beim Aktualisieren des Favoritenstatus:", error.message);
+        res.status(500).json({ error: "Fehler beim Aktualisieren des Favoritenstatus" });
     }
 });
 
