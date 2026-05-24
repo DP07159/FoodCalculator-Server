@@ -801,6 +801,63 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
     }
 });
 
+
+app.patch("/inventory/:id/stock-profile/meta", async (req, res) => {
+    try {
+        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const mode = req.body?.mode === "package" ? "package" : req.body?.mode === "loose" ? "loose" : "";
+        if (!mode) return res.status(400).json({ error: "Positionstyp ist erforderlich." });
+
+        const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
+        const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+        const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+        const newStorageLocation = typeof req.body.new_storage_location === "string" ? req.body.new_storage_location.trim() : "";
+        const newExpiryDate = typeof req.body.new_expiry_date === "string" ? req.body.new_expiry_date : "";
+
+        let result;
+        if (mode === "package") {
+            const unitWeight = Number(req.body?.unitWeight);
+            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                return res.status(400).json({ error: "Ungültige Einheit." });
+            }
+            result = await run(
+                `UPDATE inventory_batches
+                 SET storage_location = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE item_id = ?
+                   AND batch_type = 'package'
+                   AND unit_weight = ?
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [newStorageLocation, newExpiryDate, item.id, unitWeight, measureUnit, storageLocation, expiryDate]
+            );
+        } else {
+            result = await run(
+                `UPDATE inventory_batches
+                 SET storage_location = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE item_id = ?
+                   AND batch_type = 'loose'
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [newStorageLocation, newExpiryDate, item.id, measureUnit, storageLocation, expiryDate]
+            );
+        }
+
+        if (result.changes === 0) return res.status(404).json({ error: "Position nicht gefunden." });
+
+        await recalculateInventoryItem(item.id);
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [item.id]);
+        const updatedBatches = await getInventoryBatches(item.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
+    } catch (error) {
+        console.error("Fehler bei PATCH /inventory/:id/stock-profile/meta:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Aktualisieren der Bestandsposition" });
+    }
+});
+
 app.delete("/inventory/:id/stock-profile", async (req, res) => {
     try {
         const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
