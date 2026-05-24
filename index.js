@@ -215,7 +215,7 @@ function normalizeMeasureUnit(value) {
 }
 
 function normalizeUnitLabel(value) {
-    return String(value || "Einheit").trim() || "Einheit";
+    return String(value || "").trim();
 }
 
 async function getInventoryBatches(itemId, { activeOnly = false } = {}) {
@@ -685,15 +685,32 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
         } else {
             if (mode === "package") {
                 const profile = String(req.body?.packageProfile || "");
-                if (!profile) return res.status(400).json({ error: "Bitte eine vorhandene Packungseinheit auswählen." });
-                const [unitLabel, unitWeightRaw, measureUnit] = profile.split("||");
-                const unitWeight = Number(unitWeightRaw);
+                if (!profile) return res.status(400).json({ error: "Bitte eine vorhandene Einheit auswählen." });
+                const parts = profile.split("||");
+                let unitWeight = 0;
+                let measureUnit = "g";
+
+                // Neue Logik: Profile werden nur noch über Inhalt + Einheit identifiziert.
+                // Alte Profile mit zusätzlicher Packungsbezeichnung bleiben kompatibel.
+                if (parts.length >= 3) {
+                    unitWeight = Number(parts[1]);
+                    measureUnit = normalizeMeasureUnit(parts[2]);
+                } else {
+                    unitWeight = Number(parts[0]);
+                    measureUnit = normalizeMeasureUnit(parts[1]);
+                }
+
                 const countToRemove = Math.floor(amount);
+                if (!Number.isFinite(unitWeight) || unitWeight <= 0) return res.status(400).json({ error: "Ungültige Einheit." });
+
                 const packages = await all(
-                    `SELECT * FROM inventory_batches WHERE item_id = ? AND batch_type = 'package' AND unit_label = ? AND unit_weight = ? AND measure_unit = ? AND remaining_quantity > 0 ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC LIMIT ?`,
-                    [item.id, unitLabel, unitWeight, measureUnit, countToRemove]
+                    `SELECT * FROM inventory_batches
+                     WHERE item_id = ? AND batch_type = 'package' AND unit_weight = ? AND measure_unit = ? AND remaining_quantity > 0
+                     ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC
+                     LIMIT ?`,
+                    [item.id, unitWeight, measureUnit, countToRemove]
                 );
-                if (packages.length < countToRemove) return res.status(400).json({ error: "Nicht genügend Packungseinheiten vorhanden." });
+                if (packages.length < countToRemove) return res.status(400).json({ error: "Nicht genügend Einheiten vorhanden." });
                 for (const pack of packages) {
                     await run(`UPDATE inventory_batches SET remaining_quantity = 0, remaining_weight = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [pack.id]);
                 }
