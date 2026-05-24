@@ -714,59 +714,42 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
             }
         } else {
             if (mode === "package") {
-                const profile = String(req.body?.packageProfile || "");
-                if (!profile) return res.status(400).json({ error: "Bitte eine vorhandene Einheit auswählen." });
-                const parts = profile.split("||");
-                let unitWeight = 0;
-                let measureUnit = "g";
-
-                let storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
-                let expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
-                let hasStorageLocationFilter = Object.prototype.hasOwnProperty.call(req.body, "storage_location");
-                let hasExpiryDateFilter = Object.prototype.hasOwnProperty.call(req.body, "expiry_date");
-
-                // Profile werden über Inhalt + Einheit + Lagerort + Ablaufdatum identifiziert.
-                // Ältere Profile bleiben kompatibel.
-                if (parts.length >= 4) {
-                    unitWeight = Number(decodeURIComponent(parts[0]));
-                    measureUnit = normalizeMeasureUnit(decodeURIComponent(parts[1]));
-                    storageLocation = decodeURIComponent(parts[2] || "");
-                    expiryDate = decodeURIComponent(parts[3] || "");
-                    hasStorageLocationFilter = true;
-                    hasExpiryDateFilter = true;
-                } else if (parts.length >= 3) {
-                    unitWeight = Number(parts[1]);
-                    measureUnit = normalizeMeasureUnit(parts[2]);
-                } else {
-                    unitWeight = Number(parts[0]);
-                    measureUnit = normalizeMeasureUnit(parts[1]);
-                }
-
+                const unitWeight = Number(req.body?.unitWeight);
+                const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
+                const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+                const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
                 const countToRemove = Math.floor(amount);
-                if (!Number.isFinite(unitWeight) || unitWeight <= 0) return res.status(400).json({ error: "Ungültige Einheit." });
 
-                const packageWhere = [
-                    "item_id = ?",
-                    "batch_type = 'package'",
-                    "unit_weight = ?",
-                    "measure_unit = ?",
-                    "remaining_quantity > 0"
-                ];
-                const packageParams = [item.id, unitWeight, measureUnit];
-                if (hasStorageLocationFilter) { packageWhere.push("storage_location = ?"); packageParams.push(storageLocation); }
-                if (hasExpiryDateFilter) { packageWhere.push("expiry_date = ?"); packageParams.push(expiryDate); }
-                packageParams.push(countToRemove);
+                if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                    return res.status(400).json({ error: "Ungültige Einheit." });
+                }
 
                 const packages = await all(
                     `SELECT * FROM inventory_batches
-                     WHERE ${packageWhere.join(" AND ")}
-                     ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC
+                     WHERE item_id = ?
+                       AND batch_type = 'package'
+                       AND unit_weight = ?
+                       AND measure_unit = ?
+                       AND storage_location = ?
+                       AND expiry_date = ?
+                       AND remaining_quantity > 0
+                     ORDER BY id ASC
                      LIMIT ?`,
-                    packageParams
+                    [item.id, unitWeight, measureUnit, storageLocation, expiryDate, countToRemove]
                 );
-                if (packages.length < countToRemove) return res.status(400).json({ error: "Nicht genügend Einheiten vorhanden." });
+
+                if (packages.length < countToRemove) {
+                    return res.status(400).json({ error: "Nicht genügend Einheiten vorhanden." });
+                }
+
                 for (const pack of packages) {
-                    await run(`UPDATE inventory_batches SET remaining_quantity = 0, remaining_weight = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [pack.id]);
+                    // Nicht löschen: Die Position bleibt als Bestand 0 sichtbar und kann später wieder erhöht werden.
+                    await run(
+                        `UPDATE inventory_batches
+                         SET remaining_quantity = 0, remaining_weight = 0, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [pack.id]
+                    );
                 }
             } else {
                 const measureUnit = normalizeMeasureUnit(req.body.measureUnit);
@@ -815,6 +798,58 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei PATCH /inventory/:id/adjust:", error.message);
         res.status(500).json({ error: error.message || "Fehler beim Anpassen des Inventarbestands" });
+    }
+});
+
+app.delete("/inventory/:id/stock-profile", async (req, res) => {
+    try {
+        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const mode = req.body?.mode === "package" ? "package" : req.body?.mode === "loose" ? "loose" : "";
+        if (!mode) return res.status(400).json({ error: "Positionstyp ist erforderlich." });
+
+        const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
+        const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+        const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+
+        let result;
+        if (mode === "package") {
+            const unitWeight = Number(req.body?.unitWeight);
+            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                return res.status(400).json({ error: "Ungültige Einheit." });
+            }
+            result = await run(
+                `DELETE FROM inventory_batches
+                 WHERE item_id = ?
+                   AND batch_type = 'package'
+                   AND unit_weight = ?
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [item.id, unitWeight, measureUnit, storageLocation, expiryDate]
+            );
+        } else {
+            result = await run(
+                `DELETE FROM inventory_batches
+                 WHERE item_id = ?
+                   AND batch_type = 'loose'
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [item.id, measureUnit, storageLocation, expiryDate]
+            );
+        }
+
+        if (result.changes === 0) return res.status(404).json({ error: "Position nicht gefunden." });
+
+        await recalculateInventoryItem(item.id);
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [item.id]);
+        const updatedBatches = await getInventoryBatches(item.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
+    } catch (error) {
+        console.error("Fehler bei DELETE /inventory/:id/stock-profile:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Löschen der Bestandsposition" });
     }
 });
 
