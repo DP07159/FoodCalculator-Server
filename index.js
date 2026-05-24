@@ -81,6 +81,21 @@ async function ensureSchema() {
             data TEXT NOT NULL
         )
     `);
+
+    await run(`
+        CREATE TABLE IF NOT EXISTS inventory_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            quantity REAL,
+            unit TEXT DEFAULT '',
+            weight REAL,
+            expiry_date TEXT DEFAULT '',
+            storage_location TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
 }
 
 function parseMealTypes(value) {
@@ -111,6 +126,43 @@ function normalizePlanRow(plan) {
     let data = [];
     try { data = JSON.parse(plan.data || "[]"); } catch { data = []; }
     return { id: plan.id, name: plan.name, data };
+}
+
+function normalizeInventoryRow(item) {
+    return {
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity ?? null,
+        unit: item.unit || "",
+        weight: item.weight ?? null,
+        expiry_date: item.expiry_date || "",
+        storage_location: item.storage_location || "",
+        notes: item.notes || "",
+        created_at: item.created_at || "",
+        updated_at: item.updated_at || ""
+    };
+}
+
+function validateInventoryPayload(payload) {
+    const name = typeof payload.name === "string" ? payload.name.trim() : "";
+
+    if (!name) return { error: "Bezeichnung ist erforderlich." };
+
+    return {
+        value: {
+            name,
+            quantity: payload.quantity === "" || payload.quantity === null || payload.quantity === undefined
+                ? null
+                : Number(payload.quantity),
+            unit: typeof payload.unit === "string" ? payload.unit.trim() : "",
+            weight: payload.weight === "" || payload.weight === null || payload.weight === undefined
+                ? null
+                : Number(payload.weight),
+            expiry_date: typeof payload.expiry_date === "string" ? payload.expiry_date : "",
+            storage_location: typeof payload.storage_location === "string" ? payload.storage_location.trim() : "",
+            notes: typeof payload.notes === "string" ? payload.notes.trim() : ""
+        }
+    };
 }
 
 function toPositiveInteger(value) {
@@ -331,6 +383,107 @@ app.delete("/meal_plans/:id", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei DELETE /meal_plans/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Löschen des Wochenplans" });
+    }
+});
+
+app.get("/inventory", async (req, res) => {
+    try {
+        const rows = await all(`
+            SELECT * FROM inventory_items
+            ORDER BY 
+                CASE WHEN expiry_date = '' THEN 1 ELSE 0 END,
+                expiry_date ASC,
+                name COLLATE NOCASE ASC
+        `);
+        res.json(rows.map(normalizeInventoryRow));
+    } catch (error) {
+        console.error("Fehler bei GET /inventory:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Inventars" });
+    }
+});
+
+app.get("/inventory/:id", async (req, res) => {
+    try {
+        const row = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!row) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        res.json(normalizeInventoryRow(row));
+    } catch (error) {
+        console.error("Fehler bei GET /inventory/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Inventar-Eintrags" });
+    }
+});
+
+app.post("/inventory", async (req, res) => {
+    try {
+        const validation = validateInventoryPayload(req.body);
+        if (validation.error) return res.status(400).json({ error: validation.error });
+
+        const item = validation.value;
+
+        const result = await run(
+            `INSERT INTO inventory_items 
+             (name, quantity, unit, weight, expiry_date, storage_location, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                item.name,
+                item.quantity,
+                item.unit,
+                item.weight,
+                item.expiry_date,
+                item.storage_location,
+                item.notes
+            ]
+        );
+
+        const created = await get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
+        res.status(201).json(normalizeInventoryRow(created));
+    } catch (error) {
+        console.error("Fehler bei POST /inventory:", error.message);
+        res.status(500).json({ error: "Fehler beim Speichern des Inventar-Eintrags" });
+    }
+});
+
+app.put("/inventory/:id", async (req, res) => {
+    try {
+        const validation = validateInventoryPayload(req.body);
+        if (validation.error) return res.status(400).json({ error: validation.error });
+
+        const item = validation.value;
+
+        const result = await run(
+            `UPDATE inventory_items
+             SET name = ?, quantity = ?, unit = ?, weight = ?, expiry_date = ?, storage_location = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+                item.name,
+                item.quantity,
+                item.unit,
+                item.weight,
+                item.expiry_date,
+                item.storage_location,
+                item.notes,
+                req.params.id
+            ]
+        );
+
+        if (result.changes === 0) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        res.json(normalizeInventoryRow(updated));
+    } catch (error) {
+        console.error("Fehler bei PUT /inventory/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Aktualisieren des Inventar-Eintrags" });
+    }
+});
+
+app.delete("/inventory/:id", async (req, res) => {
+    try {
+        const result = await run(`DELETE FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (result.changes === 0) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Fehler bei DELETE /inventory/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Löschen des Inventar-Eintrags" });
     }
 });
 
