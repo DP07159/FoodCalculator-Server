@@ -476,6 +476,36 @@ app.put("/inventory/:id", async (req, res) => {
     }
 });
 
+app.patch("/inventory/:id/consume", async (req, res) => {
+    try {
+        const amount = Number(req.body?.amount);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({ error: "Entnahmemenge muss größer 0 sein." });
+        }
+
+        const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const currentQuantity = existing.quantity === null || existing.quantity === undefined
+            ? 0
+            : Number(existing.quantity);
+        const newQuantity = Math.max(0, currentQuantity - amount);
+
+        await run(
+            `UPDATE inventory_items
+             SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [newQuantity, req.params.id]
+        );
+
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        res.json(normalizeInventoryRow(updated));
+    } catch (error) {
+        console.error("Fehler bei PATCH /inventory/:id/consume:", error.message);
+        res.status(500).json({ error: "Fehler beim Entnehmen aus dem Inventar" });
+    }
+});
+
 app.delete("/inventory/:id", async (req, res) => {
     try {
         const result = await run(`DELETE FROM inventory_items WHERE id = ?`, [req.params.id]);
