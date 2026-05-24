@@ -476,33 +476,57 @@ app.put("/inventory/:id", async (req, res) => {
     }
 });
 
-app.patch("/inventory/:id/consume", async (req, res) => {
+app.patch("/inventory/:id/adjust", async (req, res) => {
     try {
+        const action = req.body?.action === "add" ? "add" : req.body?.action === "remove" ? "remove" : "";
+        const mode = req.body?.mode === "quantity" ? "quantity" : req.body?.mode === "weight" ? "weight" : "";
         const amount = Number(req.body?.amount);
-        if (!Number.isFinite(amount) || amount <= 0) {
-            return res.status(400).json({ error: "Entnahmemenge muss größer 0 sein." });
-        }
+        const unitWeight = Number(req.body?.unitWeight);
+
+        if (!action) return res.status(400).json({ error: "Aktion muss 'add' oder 'remove' sein." });
+        if (!mode) return res.status(400).json({ error: "Anpassungsart muss 'quantity' oder 'weight' sein." });
+        if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "Anpassungswert muss größer 0 sein." });
 
         const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
 
-        const currentQuantity = existing.quantity === null || existing.quantity === undefined
-            ? 0
-            : Number(existing.quantity);
-        const newQuantity = Math.max(0, currentQuantity - amount);
+        const direction = action === "add" ? 1 : -1;
+        const currentQuantity = existing.quantity === null || existing.quantity === undefined ? 0 : Number(existing.quantity);
+        const currentWeight = existing.weight === null || existing.weight === undefined ? 0 : Number(existing.weight);
+
+        let newQuantity = currentQuantity;
+        let newWeight = currentWeight;
+
+        if (mode === "weight") {
+            if (currentQuantity !== 1) {
+                return res.status(400).json({ error: "Gewicht kann nur direkt angepasst werden, wenn die Menge 1 beträgt." });
+            }
+
+            newWeight = Math.max(0, currentWeight + (direction * amount));
+            newQuantity = 1;
+        }
+
+        if (mode === "quantity") {
+            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                return res.status(400).json({ error: "Gewicht je Einheit muss größer 0 sein." });
+            }
+
+            newQuantity = Math.max(0, currentQuantity + (direction * amount));
+            newWeight = Math.max(0, currentWeight + (direction * amount * unitWeight));
+        }
 
         await run(
             `UPDATE inventory_items
-             SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+             SET quantity = ?, weight = ?, updated_at = CURRENT_TIMESTAMP
              WHERE id = ?`,
-            [newQuantity, req.params.id]
+            [newQuantity, newWeight, req.params.id]
         );
 
         const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         res.json(normalizeInventoryRow(updated));
     } catch (error) {
-        console.error("Fehler bei PATCH /inventory/:id/consume:", error.message);
-        res.status(500).json({ error: "Fehler beim Entnehmen aus dem Inventar" });
+        console.error("Fehler bei PATCH /inventory/:id/adjust:", error.message);
+        res.status(500).json({ error: "Fehler beim Anpassen des Inventarbestands" });
     }
 });
 
