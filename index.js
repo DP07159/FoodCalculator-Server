@@ -690,9 +690,21 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
                 let unitWeight = 0;
                 let measureUnit = "g";
 
-                // Neue Logik: Profile werden nur noch über Inhalt + Einheit identifiziert.
-                // Alte Profile mit zusätzlicher Packungsbezeichnung bleiben kompatibel.
-                if (parts.length >= 3) {
+                let storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+                let expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+                let hasStorageLocationFilter = Object.prototype.hasOwnProperty.call(req.body, "storage_location");
+                let hasExpiryDateFilter = Object.prototype.hasOwnProperty.call(req.body, "expiry_date");
+
+                // Profile werden über Inhalt + Einheit + Lagerort + Ablaufdatum identifiziert.
+                // Ältere Profile bleiben kompatibel.
+                if (parts.length >= 4) {
+                    unitWeight = Number(decodeURIComponent(parts[0]));
+                    measureUnit = normalizeMeasureUnit(decodeURIComponent(parts[1]));
+                    storageLocation = decodeURIComponent(parts[2] || "");
+                    expiryDate = decodeURIComponent(parts[3] || "");
+                    hasStorageLocationFilter = true;
+                    hasExpiryDateFilter = true;
+                } else if (parts.length >= 3) {
                     unitWeight = Number(parts[1]);
                     measureUnit = normalizeMeasureUnit(parts[2]);
                 } else {
@@ -703,12 +715,24 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
                 const countToRemove = Math.floor(amount);
                 if (!Number.isFinite(unitWeight) || unitWeight <= 0) return res.status(400).json({ error: "Ungültige Einheit." });
 
+                const packageWhere = [
+                    "item_id = ?",
+                    "batch_type = 'package'",
+                    "unit_weight = ?",
+                    "measure_unit = ?",
+                    "remaining_quantity > 0"
+                ];
+                const packageParams = [item.id, unitWeight, measureUnit];
+                if (hasStorageLocationFilter) { packageWhere.push("storage_location = ?"); packageParams.push(storageLocation); }
+                if (hasExpiryDateFilter) { packageWhere.push("expiry_date = ?"); packageParams.push(expiryDate); }
+                packageParams.push(countToRemove);
+
                 const packages = await all(
                     `SELECT * FROM inventory_batches
-                     WHERE item_id = ? AND batch_type = 'package' AND unit_weight = ? AND measure_unit = ? AND remaining_quantity > 0
+                     WHERE ${packageWhere.join(" AND ")}
                      ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC
                      LIMIT ?`,
-                    [item.id, unitWeight, measureUnit, countToRemove]
+                    packageParams
                 );
                 if (packages.length < countToRemove) return res.status(400).json({ error: "Nicht genügend Einheiten vorhanden." });
                 for (const pack of packages) {
@@ -716,10 +740,18 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
                 }
             } else {
                 const measureUnit = normalizeMeasureUnit(req.body.measureUnit);
+                const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+                const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+                const hasStorageLocationFilter = Object.prototype.hasOwnProperty.call(req.body, "storage_location");
+                const hasExpiryDateFilter = Object.prototype.hasOwnProperty.call(req.body, "expiry_date");
                 let remainingToRemove = amount;
+                const looseWhere = ["item_id = ?", "batch_type = 'loose'", "measure_unit = ?", "remaining_weight > 0"];
+                const looseParams = [item.id, measureUnit];
+                if (hasStorageLocationFilter) { looseWhere.push("storage_location = ?"); looseParams.push(storageLocation); }
+                if (hasExpiryDateFilter) { looseWhere.push("expiry_date = ?"); looseParams.push(expiryDate); }
                 const looseRows = await all(
-                    `SELECT * FROM inventory_batches WHERE item_id = ? AND batch_type = 'loose' AND measure_unit = ? AND remaining_weight > 0 ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC`,
-                    [item.id, measureUnit]
+                    `SELECT * FROM inventory_batches WHERE ${looseWhere.join(" AND ")} ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC`,
+                    looseParams
                 );
                 for (const row of looseRows) {
                     if (remainingToRemove <= 0) break;
