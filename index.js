@@ -96,6 +96,25 @@ async function ensureSchema() {
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     `);
+
+    await run(`
+        CREATE TABLE IF NOT EXISTS inventory_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            original_quantity REAL DEFAULT 0,
+            unit_weight REAL DEFAULT 0,
+            remaining_quantity REAL DEFAULT 0,
+            remaining_weight REAL DEFAULT 0,
+            expiry_date TEXT DEFAULT '',
+            storage_location TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (item_id) REFERENCES inventory_items(id) ON DELETE CASCADE
+        )
+    `);
+
+    await migrateInventoryBatches();
 }
 
 function parseMealTypes(value) {
@@ -128,7 +147,23 @@ function normalizePlanRow(plan) {
     return { id: plan.id, name: plan.name, data };
 }
 
-function normalizeInventoryRow(item) {
+function normalizeInventoryBatchRow(batch) {
+    return {
+        id: batch.id,
+        item_id: batch.item_id,
+        original_quantity: Number(batch.original_quantity ?? 0),
+        unit_weight: Number(batch.unit_weight ?? 0),
+        remaining_quantity: Number(batch.remaining_quantity ?? 0),
+        remaining_weight: Number(batch.remaining_weight ?? 0),
+        expiry_date: batch.expiry_date || "",
+        storage_location: batch.storage_location || "",
+        notes: batch.notes || "",
+        created_at: batch.created_at || "",
+        updated_at: batch.updated_at || ""
+    };
+}
+
+function normalizeInventoryRow(item, batches = []) {
     return {
         id: item.id,
         name: item.name,
@@ -138,31 +173,130 @@ function normalizeInventoryRow(item) {
         expiry_date: item.expiry_date || "",
         storage_location: item.storage_location || "",
         notes: item.notes || "",
+        batches: batches.map(normalizeInventoryBatchRow),
         created_at: item.created_at || "",
         updated_at: item.updated_at || ""
     };
 }
 
+function toNullableNumber(value) {
+    if (value === "" || value === null || value === undefined) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
 function validateInventoryPayload(payload) {
     const name = typeof payload.name === "string" ? payload.name.trim() : "";
-
     if (!name) return { error: "Bezeichnung ist erforderlich." };
+
+    const quantity = toNullableNumber(payload.quantity);
+    const weight = toNullableNumber(payload.weight);
+
+    if (quantity !== null && quantity < 0) return { error: "Menge darf nicht negativ sein." };
+    if (weight !== null && weight < 0) return { error: "Gewicht darf nicht negativ sein." };
 
     return {
         value: {
             name,
-            quantity: payload.quantity === "" || payload.quantity === null || payload.quantity === undefined
-                ? null
-                : Number(payload.quantity),
+            quantity,
             unit: typeof payload.unit === "string" ? payload.unit.trim() : "",
-            weight: payload.weight === "" || payload.weight === null || payload.weight === undefined
-                ? null
-                : Number(payload.weight),
+            weight,
             expiry_date: typeof payload.expiry_date === "string" ? payload.expiry_date : "",
             storage_location: typeof payload.storage_location === "string" ? payload.storage_location.trim() : "",
             notes: typeof payload.notes === "string" ? payload.notes.trim() : ""
         }
     };
+}
+
+function calculateUnitWeight(quantity, weight) {
+    const q = Number(quantity ?? 0);
+    const w = Number(weight ?? 0);
+    if (!Number.isFinite(q) || !Number.isFinite(w) || q <= 0 || w <= 0) return 0;
+    return w / q;
+}
+
+async function getInventoryBatches(itemId, { activeOnly = false } = {}) {
+    const where = activeOnly ? "AND (remaining_quantity > 0 OR remaining_weight > 0)" : "";
+    return all(
+        `SELECT * FROM inventory_batches
+         WHERE item_id = ? ${where}
+         ORDER BY
+            CASE WHEN expiry_date = '' THEN 1 ELSE 0 END,
+            expiry_date ASC,
+            id ASC`,
+        [itemId]
+    );
+}
+
+async function recalculateInventoryItem(itemId) {
+    const summary = await get(
+        `SELECT
+            COALESCE(SUM(remaining_quantity), 0) AS quantity,
+            COALESCE(SUM(remaining_weight), 0) AS weight,
+            MIN(NULLIF(expiry_date, '')) AS next_expiry
+         FROM inventory_batches
+         WHERE item_id = ?`,
+        [itemId]
+    );
+
+    const locationRow = await get(
+        `SELECT storage_location
+         FROM inventory_batches
+         WHERE item_id = ? AND storage_location <> '' AND (remaining_quantity > 0 OR remaining_weight > 0)
+         ORDER BY
+            CASE WHEN expiry_date = '' THEN 1 ELSE 0 END,
+            expiry_date ASC,
+            id ASC
+         LIMIT 1`,
+        [itemId]
+    );
+
+    await run(
+        `UPDATE inventory_items
+         SET quantity = ?, weight = ?, expiry_date = COALESCE(?, ''), storage_location = COALESCE(?, storage_location), updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [summary.quantity || 0, summary.weight || 0, summary.next_expiry || "", locationRow?.storage_location || null, itemId]
+    );
+}
+
+async function createInventoryBatch(itemId, item, { quantity, unitWeight, weight, expiry_date, storage_location, notes }) {
+    const safeQuantity = Math.max(0, Number(quantity ?? 0));
+    const safeUnitWeight = Math.max(0, Number(unitWeight ?? 0));
+    const safeWeight = weight !== undefined && weight !== null
+        ? Math.max(0, Number(weight))
+        : safeQuantity * safeUnitWeight;
+
+    await run(
+        `INSERT INTO inventory_batches
+         (item_id, original_quantity, unit_weight, remaining_quantity, remaining_weight, expiry_date, storage_location, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [itemId, safeQuantity, safeUnitWeight, safeQuantity, safeWeight, expiry_date ?? item.expiry_date ?? "", storage_location ?? item.storage_location ?? "", notes ?? ""]
+    );
+
+    await recalculateInventoryItem(itemId);
+}
+
+async function migrateInventoryBatches() {
+    const items = await all(`SELECT * FROM inventory_items`);
+
+    for (const item of items) {
+        const existingBatch = await get(`SELECT id FROM inventory_batches WHERE item_id = ? LIMIT 1`, [item.id]);
+        if (existingBatch) continue;
+
+        const quantity = Number(item.quantity ?? 0);
+        const weight = Number(item.weight ?? 0);
+        if (quantity <= 0 && weight <= 0) continue;
+
+        const unitWeight = calculateUnitWeight(quantity, weight);
+        await createInventoryBatch(item.id, item, {
+            quantity,
+            unitWeight,
+            weight,
+            expiry_date: item.expiry_date || "",
+            storage_location: item.storage_location || "",
+            notes: "Aus bestehendem Bestand übernommen"
+        });
+    }
 }
 
 function toPositiveInteger(value) {
@@ -395,7 +529,14 @@ app.get("/inventory", async (req, res) => {
                 expiry_date ASC,
                 name COLLATE NOCASE ASC
         `);
-        res.json(rows.map(normalizeInventoryRow));
+
+        const enriched = [];
+        for (const row of rows) {
+            const batches = await getInventoryBatches(row.id);
+            enriched.push(normalizeInventoryRow(row, batches));
+        }
+
+        res.json(enriched);
     } catch (error) {
         console.error("Fehler bei GET /inventory:", error.message);
         res.status(500).json({ error: "Fehler beim Laden des Inventars" });
@@ -406,7 +547,8 @@ app.get("/inventory/:id", async (req, res) => {
     try {
         const row = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         if (!row) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
-        res.json(normalizeInventoryRow(row));
+        const batches = await getInventoryBatches(row.id);
+        res.json(normalizeInventoryRow(row, batches));
     } catch (error) {
         console.error("Fehler bei GET /inventory/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Laden des Inventar-Eintrags" });
@@ -424,19 +566,23 @@ app.post("/inventory", async (req, res) => {
             `INSERT INTO inventory_items 
              (name, quantity, unit, weight, expiry_date, storage_location, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-                item.name,
-                item.quantity,
-                item.unit,
-                item.weight,
-                item.expiry_date,
-                item.storage_location,
-                item.notes
-            ]
+            [item.name, 0, item.unit, 0, item.expiry_date, item.storage_location, item.notes]
         );
 
+        if ((item.quantity ?? 0) > 0 || (item.weight ?? 0) > 0) {
+            await createInventoryBatch(result.lastID, item, {
+                quantity: item.quantity ?? 0,
+                unitWeight: calculateUnitWeight(item.quantity, item.weight),
+                weight: item.weight ?? 0,
+                expiry_date: item.expiry_date,
+                storage_location: item.storage_location,
+                notes: "Ersterfassung"
+            });
+        }
+
         const created = await get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
-        res.status(201).json(normalizeInventoryRow(created));
+        const batches = await getInventoryBatches(result.lastID);
+        res.status(201).json(normalizeInventoryRow(created, batches));
     } catch (error) {
         console.error("Fehler bei POST /inventory:", error.message);
         res.status(500).json({ error: "Fehler beim Speichern des Inventar-Eintrags" });
@@ -449,27 +595,41 @@ app.put("/inventory/:id", async (req, res) => {
         if (validation.error) return res.status(400).json({ error: validation.error });
 
         const item = validation.value;
+        const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
 
-        const result = await run(
+        await run(
             `UPDATE inventory_items
-             SET name = ?, quantity = ?, unit = ?, weight = ?, expiry_date = ?, storage_location = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+             SET name = ?, unit = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
              WHERE id = ?`,
-            [
-                item.name,
-                item.quantity,
-                item.unit,
-                item.weight,
-                item.expiry_date,
-                item.storage_location,
-                item.notes,
-                req.params.id
-            ]
+            [item.name, item.unit, item.notes, req.params.id]
         );
 
-        if (result.changes === 0) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        const batches = await getInventoryBatches(req.params.id);
+        if (batches.length === 1 && ((item.quantity ?? 0) > 0 || (item.weight ?? 0) > 0)) {
+            const unitWeight = calculateUnitWeight(item.quantity, item.weight);
+            await run(
+                `UPDATE inventory_batches
+                 SET original_quantity = ?, unit_weight = ?, remaining_quantity = ?, remaining_weight = ?, expiry_date = ?, storage_location = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [item.quantity ?? 0, unitWeight, item.quantity ?? 0, item.weight ?? 0, item.expiry_date, item.storage_location, batches[0].id]
+            );
+        } else if (batches.length === 0 && ((item.quantity ?? 0) > 0 || (item.weight ?? 0) > 0)) {
+            await createInventoryBatch(req.params.id, item, {
+                quantity: item.quantity ?? 0,
+                unitWeight: calculateUnitWeight(item.quantity, item.weight),
+                weight: item.weight ?? 0,
+                expiry_date: item.expiry_date,
+                storage_location: item.storage_location,
+                notes: "Nachträglich angelegt"
+            });
+        }
+
+        await recalculateInventoryItem(req.params.id);
 
         const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
-        res.json(normalizeInventoryRow(updated));
+        const updatedBatches = await getInventoryBatches(req.params.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
     } catch (error) {
         console.error("Fehler bei PUT /inventory/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Inventar-Eintrags" });
@@ -481,49 +641,85 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
         const action = req.body?.action === "add" ? "add" : req.body?.action === "remove" ? "remove" : "";
         const mode = req.body?.mode === "quantity" ? "quantity" : req.body?.mode === "weight" ? "weight" : "";
         const amount = Number(req.body?.amount);
-        const unitWeight = Number(req.body?.unitWeight);
+        const suppliedUnitWeight = Number(req.body?.unitWeight);
+        const batchId = req.body?.batchId ? Number(req.body.batchId) : null;
 
         if (!action) return res.status(400).json({ error: "Aktion muss 'add' oder 'remove' sein." });
         if (!mode) return res.status(400).json({ error: "Anpassungsart muss 'quantity' oder 'weight' sein." });
         if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "Anpassungswert muss größer 0 sein." });
 
-        const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
-        if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
 
-        const direction = action === "add" ? 1 : -1;
-        const currentQuantity = existing.quantity === null || existing.quantity === undefined ? 0 : Number(existing.quantity);
-        const currentWeight = existing.weight === null || existing.weight === undefined ? 0 : Number(existing.weight);
+        if (action === "add" && mode === "quantity") {
+            let unitWeight = Number.isFinite(suppliedUnitWeight) && suppliedUnitWeight > 0 ? suppliedUnitWeight : 0;
+            let profile = null;
+            if (batchId) {
+                profile = await get(`SELECT * FROM inventory_batches WHERE id = ? AND item_id = ?`, [batchId, req.params.id]);
+                if (profile && !unitWeight) unitWeight = Number(profile.unit_weight ?? 0);
+            }
+            if (!unitWeight) return res.status(400).json({ error: "Gewicht je Einheit muss größer 0 sein." });
 
-        let newQuantity = currentQuantity;
-        let newWeight = currentWeight;
+            await createInventoryBatch(req.params.id, item, {
+                quantity: amount,
+                unitWeight,
+                weight: amount * unitWeight,
+                expiry_date: profile?.expiry_date || item.expiry_date || "",
+                storage_location: profile?.storage_location || item.storage_location || "",
+                notes: "Bestand hinzugefügt"
+            });
+        }
+
+        if (action === "remove" && mode === "quantity") {
+            if (!batchId) return res.status(400).json({ error: "Bitte eine vorhandene Bestandseinheit auswählen." });
+            const batch = await get(`SELECT * FROM inventory_batches WHERE id = ? AND item_id = ?`, [batchId, req.params.id]);
+            if (!batch) return res.status(404).json({ error: "Bestandseinheit nicht gefunden." });
+
+            const currentQuantity = Number(batch.remaining_quantity ?? 0);
+            const currentWeight = Number(batch.remaining_weight ?? 0);
+            const unitWeight = Number(batch.unit_weight ?? suppliedUnitWeight ?? 0);
+            const quantityToRemove = Math.min(amount, currentQuantity);
+            const weightToRemove = Math.min(currentWeight, quantityToRemove * unitWeight);
+
+            await run(
+                `UPDATE inventory_batches
+                 SET remaining_quantity = ?, remaining_weight = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [Math.max(0, currentQuantity - quantityToRemove), Math.max(0, currentWeight - weightToRemove), batch.id]
+            );
+        }
 
         if (mode === "weight") {
-            if (currentQuantity !== 1) {
-                return res.status(400).json({ error: "Gewicht kann nur direkt angepasst werden, wenn die Menge 1 beträgt." });
+            const activeBatches = await getInventoryBatches(req.params.id, { activeOnly: true });
+            const totalQuantity = activeBatches.reduce((sum, batch) => sum + Number(batch.remaining_quantity ?? 0), 0);
+
+            if (totalQuantity !== 1) {
+                return res.status(400).json({ error: "Gewicht kann nur direkt angepasst werden, wenn die Gesamtmenge exakt 1 beträgt." });
             }
 
-            newWeight = Math.max(0, currentWeight + (direction * amount));
-            newQuantity = 1;
+            const batch = batchId
+                ? await get(`SELECT * FROM inventory_batches WHERE id = ? AND item_id = ?`, [batchId, req.params.id])
+                : activeBatches[0];
+            if (!batch) return res.status(404).json({ error: "Bestandseinheit nicht gefunden." });
+
+            const currentWeight = Number(batch.remaining_weight ?? 0);
+            const direction = action === "add" ? 1 : -1;
+            const newWeight = Math.max(0, currentWeight + direction * amount);
+            const newQuantity = newWeight > 0 ? 1 : 0;
+
+            await run(
+                `UPDATE inventory_batches
+                 SET remaining_quantity = ?, remaining_weight = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [newQuantity, newWeight, batch.id]
+            );
         }
 
-        if (mode === "quantity") {
-            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
-                return res.status(400).json({ error: "Gewicht je Einheit muss größer 0 sein." });
-            }
-
-            newQuantity = Math.max(0, currentQuantity + (direction * amount));
-            newWeight = Math.max(0, currentWeight + (direction * amount * unitWeight));
-        }
-
-        await run(
-            `UPDATE inventory_items
-             SET quantity = ?, weight = ?, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
-            [newQuantity, newWeight, req.params.id]
-        );
+        await recalculateInventoryItem(req.params.id);
 
         const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
-        res.json(normalizeInventoryRow(updated));
+        const updatedBatches = await getInventoryBatches(req.params.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
     } catch (error) {
         console.error("Fehler bei PATCH /inventory/:id/adjust:", error.message);
         res.status(500).json({ error: "Fehler beim Anpassen des Inventarbestands" });
@@ -532,6 +728,7 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
 
 app.delete("/inventory/:id", async (req, res) => {
     try {
+        await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [req.params.id]);
         const result = await run(`DELETE FROM inventory_items WHERE id = ?`, [req.params.id]);
         if (result.changes === 0) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
         res.json({ success: true });
