@@ -242,34 +242,53 @@ function cleanIngredientName(value) {
 
     return String(value || "")
         .replace(/\([^)]*\)/g, " ")
+        // Alle Mengen-/Einheitenfragmente aus dem Namen entfernen.
+        // Wichtig für Zeilen wie „1 Dose Thunfisch 150 g“: Wenn 150 g als relevante
+        // Vergleichsmenge erkannt wird, darf „1 Dose“ nicht im Lebensmittelnamen bleiben.
         .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
+        .replace(new RegExp(`(^|[\\s,(])${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
+        .replace(new RegExp(`(^|[\\s,(])(${unitPattern})\\s*${amountPattern}\\b`, "gi"), " ")
         .replace(/[,;]/g, " ")
-        .replace(/\b(frisch|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\b/gi, "")
-        .replace(/\s+/g, " ")
+        .replace(/\\b(frisch|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\\b/gi, "")
+        .replace(/\\s+/g, " ")
         .trim();
 }
 
 function findAmountUnitInIngredient(rawText) {
-    const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
     const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
-    const amountUnitRegex = new RegExp(`(^|[\\s,(])(${amountPattern})\\s*(${unitPattern})\\b`, "i");
-    const unitAmountRegex = new RegExp(`(^|[\\s,(])(${unitPattern})\\s*(${amountPattern})\\b`, "i");
+    const physicalUnitPattern = "kg|g|gr|gramm|ml|l|liter";
+    const containerUnitPattern = "stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
 
-    let match = rawText.match(amountUnitRegex);
-    if (match) {
-        const prefixLength = match[1] ? match[1].length : 0;
-        const start = match.index + prefixLength;
-        const token = match[0].slice(prefixLength);
-        return { start, end: start + token.length, amountText: match[2], unitText: match[3] };
+    function findWithUnitPattern(unitPattern) {
+        const amountUnitRegex = new RegExp(`(^|[\\s,(])(${amountPattern})\\s*(${unitPattern})\\b`, "i");
+        const unitAmountRegex = new RegExp(`(^|[\\s,(])(${unitPattern})\\s*(${amountPattern})\\b`, "i");
+
+        let match = rawText.match(amountUnitRegex);
+        if (match) {
+            const prefixLength = match[1] ? match[1].length : 0;
+            const start = match.index + prefixLength;
+            const token = match[0].slice(prefixLength);
+            return { start, end: start + token.length, amountText: match[2], unitText: match[3] };
+        }
+
+        match = rawText.match(unitAmountRegex);
+        if (match) {
+            const prefixLength = match[1] ? match[1].length : 0;
+            const start = match.index + prefixLength;
+            const token = match[0].slice(prefixLength);
+            return { start, end: start + token.length, amountText: match[3], unitText: match[2] };
+        }
+
+        return null;
     }
 
-    match = rawText.match(unitAmountRegex);
-    if (match) {
-        const prefixLength = match[1] ? match[1].length : 0;
-        const start = match.index + prefixLength;
-        const token = match[0].slice(prefixLength);
-        return { start, end: start + token.length, amountText: match[3], unitText: match[2] };
-    }
+    // Priorität: Wenn eine echte Gewichts-/Volumenangabe vorhanden ist, ist sie maßgeblich.
+    // Packungs-/Stückangaben dürfen den Gewichtsabgleich nicht aushebeln.
+    let match = findWithUnitPattern(physicalUnitPattern);
+    if (match) return match;
+
+    match = findWithUnitPattern(containerUnitPattern);
+    if (match) return match;
 
     const amountOnlyRegex = new RegExp(`(^|[\\s,(])(${amountPattern})(?=\\s|$)`, "i");
     match = rawText.match(amountOnlyRegex);
@@ -443,27 +462,95 @@ function scaleIngredientLineForPortions(rawLine, factor) {
     return `${text.slice(0, amountUnit.start)}${scaledText}${text.slice(amountUnit.start + amountUnit.amountText.length)}`;
 }
 
+function getInventoryStockBreakdown(item) {
+    const batches = Array.isArray(item?.batches) ? item.batches : [];
+
+    return batches.reduce((result, batch) => {
+        const batchUnit = unitForInventory(batch.measure_unit || item.unit || "g");
+        const remainingQuantity = Math.max(0, Number(batch.remaining_quantity || 0));
+        const remainingWeight = Math.max(0, Number(batch.remaining_weight || 0));
+
+        if (batch.batch_type === "package") {
+            result.packageCount += remainingQuantity;
+        }
+
+        if (batchUnit === "g") {
+            result.g += remainingWeight;
+        } else if (batchUnit === "ml") {
+            result.ml += remainingWeight;
+        } else if (batchUnit === "Stk.") {
+            if (batch.batch_type === "package") {
+                result.stk += remainingQuantity;
+            } else {
+                result.stk += remainingWeight;
+            }
+        }
+
+        return result;
+    }, { g: 0, ml: 0, stk: 0, packageCount: 0 });
+}
+
+function isContainerUnit(unit) {
+    const normalized = normalizeIngredientUnit(unit);
+    return ["Dose", "Glas", "Packung", "Stk."].includes(normalized);
+}
+
 function getInventoryAvailableAmountForUnit(item, requestedUnit) {
     if (!item) return 0;
     const inventoryUnit = unitForInventory(requestedUnit || item.unit || "g");
-    const batches = Array.isArray(item.batches) ? item.batches : [];
+    const stock = getInventoryStockBreakdown(item);
 
-    return batches.reduce((sum, batch) => {
-        const batchUnit = unitForInventory(batch.measure_unit || item.unit || "g");
-        const remainingQuantity = Number(batch.remaining_quantity || 0);
-        const remainingWeight = Number(batch.remaining_weight || 0);
+    if (inventoryUnit === "g") return stock.g;
+    if (inventoryUnit === "ml") return stock.ml;
+    if (inventoryUnit === "Stk.") return stock.stk || stock.packageCount;
+    return 0;
+}
 
-        if (inventoryUnit === "g" || inventoryUnit === "ml") {
-            return batchUnit === inventoryUnit ? sum + remainingWeight : sum;
+function compareRecipeIngredientWithStock(item, ingredient, required) {
+    if (!item) {
+        return { available: 0, status: "missing", note: "Kein passendes Lebensmittel im Inventar" };
+    }
+
+    const requestedUnit = ingredient?.unit || item.unit || "g";
+    const inventoryUnit = unitForInventory(requestedUnit);
+    const originalUnit = normalizeIngredientUnit(ingredient?.original_unit || requestedUnit);
+    const stock = getInventoryStockBreakdown(item);
+    const available = getInventoryAvailableAmountForUnit(item, requestedUnit);
+    const hasAnyStock = stock.g > 0 || stock.ml > 0 || stock.stk > 0 || stock.packageCount > 0;
+
+    if (!hasAnyStock) {
+        return { available: 0, status: "missing", note: "Bestand ist 0" };
+    }
+
+    if (required === null || required === undefined || !Number.isFinite(Number(required)) || Number(required) <= 0) {
+        return { available, status: "available", note: "Lebensmittel ist im Bestand" };
+    }
+
+    if (inventoryUnit === "Stk." && isContainerUnit(originalUnit)) {
+        const countAvailable = stock.stk || stock.packageCount;
+        if (countAvailable >= Number(required)) {
+            return { available: countAvailable, status: "available", note: "Benötigte Einheit ist vorhanden" };
+        }
+        if (countAvailable > 0) {
+            return { available: countAvailable, status: "partial", note: "Nur ein Teil der benötigten Einheiten ist vorhanden" };
         }
 
-        if (inventoryUnit === "Stk.") {
-            if (batch.batch_type === "package") return sum + remainingQuantity;
-            return batchUnit === "Stk." ? sum + remainingWeight : sum;
-        }
+        // Beispiel: Rezept verlangt „1 Dose Thunfisch“, Inventar enthält aber nur eine freie/gewichtete Menge
+        // desselben Lebensmittels. Das ist nicht exakt vergleichbar, aber definitiv nicht „Bestand 0“.
+        return { available: 0, status: "partial", note: "Lebensmittel vorhanden, Einheit/Menge aber nicht exakt vergleichbar" };
+    }
 
-        return sum;
-    }, 0);
+    if (available >= Number(required)) {
+        return { available, status: "available", note: "Benötigte Menge ist vorhanden" };
+    }
+
+    if (available > 0) {
+        return { available, status: "partial", note: "Nur ein Teil der benötigten Menge ist vorhanden" };
+    }
+
+    // Auch hier gilt: Wenn das Lebensmittel vorhanden ist, aber nur in einer anderen Mengeneinheit,
+    // zeigen wir gelb statt rot. Rot ist strikt für echten Leerbestand reserviert.
+    return { available, status: "partial", note: "Lebensmittel vorhanden, aber nicht in der benötigten Einheit" };
 }
 
 function findInventoryItemForIngredient(parsedIngredient, inventoryItems) {
@@ -485,12 +572,7 @@ function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
         ? Number(requiredBase) * factor
         : null;
     const requestedUnit = improved?.unit || item?.unit || "g";
-    const available = getInventoryAvailableAmountForUnit(item, requestedUnit);
-
-    let status = "missing";
-    if (item && available > 0) {
-        status = required && required > 0 ? (available >= required ? "available" : "partial") : "available";
-    }
+    const comparison = compareRecipeIngredientWithStock(item, improved, required);
 
     return {
         raw_text: improved?.raw_text || "",
@@ -499,9 +581,10 @@ function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
         item_id: item?.id || null,
         required_amount: required,
         required_unit: requestedUnit,
-        available_amount: available,
-        status,
-        label: status === "available" ? "Vorhanden" : status === "partial" ? "Teilweise vorhanden" : "Nicht vorhanden"
+        available_amount: comparison.available,
+        status: comparison.status,
+        label: comparison.status === "available" ? "Vorhanden" : comparison.status === "partial" ? "Teilweise vorhanden" : "Nicht vorhanden",
+        note: comparison.note
     };
 }
 
