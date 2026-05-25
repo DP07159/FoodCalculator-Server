@@ -358,6 +358,153 @@ async function syncAllRecipeIngredients() {
     }
 }
 
+
+function normalizeComparableName(value) {
+    return String(value || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/ß/g, "ss")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(/[^a-z0-9äöüÄÖÜß\s-]/gi, " ")
+        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach|geschmack|ca|circa|etwa)\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function singularizeComparableName(value) {
+    let text = normalizeComparableName(value);
+    if (text.length <= 3) return text;
+    text = text.replace(/\b(\w+)(chen|lein)\b/g, "$1$2");
+    text = text.replace(/\b(\w+?)(innen|ungen|keiten|heiten)\b/g, "$1");
+    text = text.replace(/\b(\w+?)(en|er|n|e|s)\b/g, (match, stem) => stem.length >= 3 ? stem : match);
+    return text.replace(/\s+/g, " ").trim();
+}
+
+function getComparableNameVariants(value) {
+    const normalized = normalizeComparableName(value);
+    const singular = singularizeComparableName(normalized);
+    return Array.from(new Set([normalized, singular].filter(Boolean)));
+}
+
+function comparableNamesMatch(a, b) {
+    const aVariants = getComparableNameVariants(a);
+    const bVariants = getComparableNameVariants(b);
+    if (!aVariants.length || !bVariants.length) return false;
+    if (aVariants.some(value => bVariants.includes(value))) return true;
+
+    return aVariants.some(av => bVariants.some(bv => {
+        if (av.length < 3 || bv.length < 3) return false;
+        const aTokens = av.split(" ").filter(token => token.length >= 3);
+        const bTokens = bv.split(" ").filter(token => token.length >= 3);
+        if (!aTokens.length || !bTokens.length) return false;
+        return aTokens.every(token => bTokens.includes(token)) || bTokens.every(token => aTokens.includes(token));
+    }));
+}
+
+function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
+    if (!parsedIngredient) return parsedIngredient;
+    const rawComparable = normalizeComparableName(parsedIngredient.raw_text);
+    const parsedComparable = normalizeComparableName(parsedIngredient.food_name);
+
+    const candidates = inventoryItems
+        .flatMap(item => [item.name, item.recipe_match_name].filter(Boolean).map(name => ({ item, name })))
+        .filter(candidate => {
+            const candidateComparable = normalizeComparableName(candidate.name);
+            if (!candidateComparable || candidateComparable.length < 3) return false;
+            return comparableNamesMatch(parsedComparable, candidateComparable)
+                || rawComparable.includes(candidateComparable)
+                || candidateComparable.includes(parsedComparable);
+        })
+        .sort((a, b) => normalizeComparableName(b.name).length - normalizeComparableName(a.name).length);
+
+    if (!candidates.length) return parsedIngredient;
+    return { ...parsedIngredient, food_name: candidates[0].item.name, matched_item_id: candidates[0].item.id };
+}
+
+function convertAmountForDisplay(amount, originalUnit, inventoryUnit) {
+    if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) return null;
+    const unit = normalizeIngredientUnit(originalUnit || inventoryUnit);
+    if (unit === "kg" || unit === "l") return Number(amount) / 1000;
+    return Number(amount);
+}
+
+function scaleIngredientLineForPortions(rawLine, factor) {
+    if (factor === 1) return rawLine;
+    const text = String(rawLine || "");
+    const amountUnit = findAmountUnitInIngredient(text);
+    if (!amountUnit) return text;
+
+    const amount = parseFraction(amountUnit.amountText);
+    if (amount === null || amount === undefined) return text;
+
+    const scaled = Math.round(amount * factor * 100) / 100;
+    const scaledText = String(scaled).replace(".", ",");
+    return `${text.slice(0, amountUnit.start)}${scaledText}${text.slice(amountUnit.start + amountUnit.amountText.length)}`;
+}
+
+function getInventoryAvailableAmountForUnit(item, requestedUnit) {
+    if (!item) return 0;
+    const inventoryUnit = unitForInventory(requestedUnit || item.unit || "g");
+    const batches = Array.isArray(item.batches) ? item.batches : [];
+
+    return batches.reduce((sum, batch) => {
+        const batchUnit = unitForInventory(batch.measure_unit || item.unit || "g");
+        const remainingQuantity = Number(batch.remaining_quantity || 0);
+        const remainingWeight = Number(batch.remaining_weight || 0);
+
+        if (inventoryUnit === "g" || inventoryUnit === "ml") {
+            return batchUnit === inventoryUnit ? sum + remainingWeight : sum;
+        }
+
+        if (inventoryUnit === "Stk.") {
+            if (batch.batch_type === "package") return sum + remainingQuantity;
+            return batchUnit === "Stk." ? sum + remainingWeight : sum;
+        }
+
+        return sum;
+    }, 0);
+}
+
+function findInventoryItemForIngredient(parsedIngredient, inventoryItems) {
+    if (!parsedIngredient) return null;
+    if (parsedIngredient.matched_item_id) {
+        const byId = inventoryItems.find(item => Number(item.id) === Number(parsedIngredient.matched_item_id));
+        if (byId) return byId;
+    }
+
+    return inventoryItems.find(item => comparableNamesMatch(parsedIngredient.food_name, item.name)
+        || comparableNamesMatch(parsedIngredient.food_name, item.recipe_match_name || "")) || null;
+}
+
+function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
+    const improved = improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems);
+    const item = findInventoryItemForIngredient(improved, inventoryItems);
+    const requiredBase = improved?.amount;
+    const required = requiredBase !== null && requiredBase !== undefined && Number.isFinite(Number(requiredBase))
+        ? Number(requiredBase) * factor
+        : null;
+    const requestedUnit = improved?.unit || item?.unit || "g";
+    const available = getInventoryAvailableAmountForUnit(item, requestedUnit);
+
+    let status = "missing";
+    if (item && available > 0) {
+        status = required && required > 0 ? (available >= required ? "available" : "partial") : "available";
+    }
+
+    return {
+        raw_text: improved?.raw_text || "",
+        display_text: scaleIngredientLineForPortions(improved?.raw_text || "", factor),
+        food_name: improved?.food_name || "",
+        item_id: item?.id || null,
+        required_amount: required,
+        required_unit: requestedUnit,
+        available_amount: available,
+        status,
+        label: status === "available" ? "Vorhanden" : status === "partial" ? "Teilweise vorhanden" : "Nicht vorhanden"
+    };
+}
+
 function normalizeRecipeRow(recipe) {
     return {
         id: recipe.id,
@@ -816,6 +963,47 @@ app.delete("/meal_plans/:id", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei DELETE /meal_plans/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Löschen des Wochenplans" });
+    }
+});
+
+
+app.get("/recipes/:id/stock-check", async (req, res) => {
+    try {
+        const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        if (!recipe) return res.status(404).json({ error: "Rezept nicht gefunden" });
+
+        const requestedPortions = Number.parseInt(req.query.portions, 10);
+        const basePortions = Number.parseInt(recipe.portions, 10) > 0 ? Number.parseInt(recipe.portions, 10) : 1;
+        const displayedPortions = Number.isInteger(requestedPortions) && requestedPortions > 0 ? requestedPortions : basePortions;
+        const factor = displayedPortions / basePortions;
+
+        const inventoryRows = await all(`SELECT * FROM inventory_items ORDER BY name COLLATE NOCASE ASC`);
+        const inventoryItems = [];
+        for (const row of inventoryRows) {
+            const batches = await getInventoryBatches(row.id);
+            inventoryItems.push(normalizeInventoryRow(row, batches));
+        }
+
+        const parsedIngredients = parseIngredientsText(recipe.ingredients || "");
+        const entries = parsedIngredients.map(ingredient => buildRecipeStockEntry(ingredient, inventoryItems, factor));
+
+        const summary = entries.reduce((result, entry) => {
+            if (entry.status === "available") result.available += 1;
+            if (entry.status === "partial") result.partial += 1;
+            if (entry.status === "missing") result.missing += 1;
+            return result;
+        }, { available: 0, partial: 0, missing: 0 });
+
+        res.json({
+            recipe_id: Number(recipe.id),
+            base_portions: basePortions,
+            displayed_portions: displayedPortions,
+            ingredients: entries,
+            summary
+        });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/:id/stock-check:", error.message);
+        res.status(500).json({ error: "Bestandsprüfung konnte nicht geladen werden" });
     }
 });
 
