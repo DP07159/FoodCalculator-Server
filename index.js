@@ -242,16 +242,61 @@ function cleanIngredientName(value) {
 
     return String(value || "")
         .replace(/\([^)]*\)/g, " ")
-        // Alle Mengen-/Einheitenfragmente aus dem Namen entfernen.
-        // Wichtig für Zeilen wie „1 Dose Thunfisch 150 g“: Wenn 150 g als relevante
-        // Vergleichsmenge erkannt wird, darf „1 Dose“ nicht im Lebensmittelnamen bleiben.
         .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])(${unitPattern})\\s*${amountPattern}\\b`, "gi"), " ")
-        .replace(/[,;]/g, " ")
-        .replace(/\\b(frisch|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\\b/gi, "")
-        .replace(/\\s+/g, " ")
+        .replace(/[,;:/]/g, " ")
+        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ")
+        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack|abtropfgewicht|abgetropft|netto|einwaage|füllmenge|fuellmenge)\b/gi, " ")
+        .replace(/\s+/g, " ")
         .trim();
+}
+
+function findAmountUnitMatches(rawText, unitPattern) {
+    const text = String(rawText || "");
+    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
+    const matches = [];
+
+    const patterns = [
+        { regex: new RegExp(`(^|[\\s,(])(${amountPattern})\\s*(${unitPattern})\\b`, "gi"), amountIndex: 2, unitIndex: 3 },
+        { regex: new RegExp(`(^|[\\s,(])(${unitPattern})\\s*(${amountPattern})\\b`, "gi"), amountIndex: 3, unitIndex: 2 }
+    ];
+
+    for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.regex.exec(text)) !== null) {
+            const prefixLength = match[1] ? match[1].length : 0;
+            const start = match.index + prefixLength;
+            const token = match[0].slice(prefixLength);
+            matches.push({
+                start,
+                end: start + token.length,
+                amountText: match[pattern.amountIndex],
+                unitText: match[pattern.unitIndex],
+                token
+            });
+        }
+    }
+
+    return matches.sort((a, b) => a.start - b.start);
+}
+
+function getContainerMultiplier(rawText, physicalMatch) {
+    const textBeforePhysical = String(rawText || "").slice(0, physicalMatch?.start ?? 0);
+    const containerUnitPattern = "stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg";
+    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
+    const containerMatches = findAmountUnitMatches(textBeforePhysical, containerUnitPattern);
+    if (!containerMatches.length) return 1;
+
+    const lastContainer = containerMatches[containerMatches.length - 1];
+    const between = String(rawText || "").slice(lastContainer.end, physicalMatch.start).toLowerCase();
+    const hasPerUnitHint = /(?:\b(?:a|à|je|pro)\b|\/|per)/i.test(between);
+    const isCloseEnough = between.length <= 50;
+
+    if (!hasPerUnitHint && !isCloseEnough) return 1;
+
+    const multiplier = parseFraction(lastContainer.amountText);
+    return multiplier && multiplier > 0 ? multiplier : 1;
 }
 
 function findAmountUnitInIngredient(rawText) {
@@ -259,44 +304,27 @@ function findAmountUnitInIngredient(rawText) {
     const physicalUnitPattern = "kg|g|gr|gramm|ml|l|liter";
     const containerUnitPattern = "stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
 
-    function findWithUnitPattern(unitPattern) {
-        const amountUnitRegex = new RegExp(`(^|[\\s,(])(${amountPattern})\\s*(${unitPattern})\\b`, "i");
-        const unitAmountRegex = new RegExp(`(^|[\\s,(])(${unitPattern})\\s*(${amountPattern})\\b`, "i");
-
-        let match = rawText.match(amountUnitRegex);
-        if (match) {
-            const prefixLength = match[1] ? match[1].length : 0;
-            const start = match.index + prefixLength;
-            const token = match[0].slice(prefixLength);
-            return { start, end: start + token.length, amountText: match[2], unitText: match[3] };
-        }
-
-        match = rawText.match(unitAmountRegex);
-        if (match) {
-            const prefixLength = match[1] ? match[1].length : 0;
-            const start = match.index + prefixLength;
-            const token = match[0].slice(prefixLength);
-            return { start, end: start + token.length, amountText: match[3], unitText: match[2] };
-        }
-
-        return null;
+    const physicalMatches = findAmountUnitMatches(rawText, physicalUnitPattern);
+    if (physicalMatches.length) {
+        const text = String(rawText || "").toLowerCase();
+        // Bei mehreren Gewichtsangaben ist z.B. bei Thunfisch oft das Abtropfgewicht maßgeblich.
+        // Sonst nehmen wir die erste echte Gewichts-/Volumenangabe und lassen Packungsangaben nur als Multiplikator wirken.
+        const selected = /abtropf|abgetropft|netto|einwaage/.test(text)
+            ? physicalMatches[physicalMatches.length - 1]
+            : physicalMatches[0];
+        return { ...selected, multiplier: getContainerMultiplier(rawText, selected) };
     }
 
-    // Priorität: Wenn eine echte Gewichts-/Volumenangabe vorhanden ist, ist sie maßgeblich.
-    // Packungs-/Stückangaben dürfen den Gewichtsabgleich nicht aushebeln.
-    let match = findWithUnitPattern(physicalUnitPattern);
-    if (match) return match;
-
-    match = findWithUnitPattern(containerUnitPattern);
-    if (match) return match;
+    const containerMatches = findAmountUnitMatches(rawText, containerUnitPattern);
+    if (containerMatches.length) return { ...containerMatches[0], multiplier: 1 };
 
     const amountOnlyRegex = new RegExp(`(^|[\\s,(])(${amountPattern})(?=\\s|$)`, "i");
-    match = rawText.match(amountOnlyRegex);
+    const match = String(rawText || "").match(amountOnlyRegex);
     if (match) {
         const prefixLength = match[1] ? match[1].length : 0;
         const start = match.index + prefixLength;
         const token = match[0].slice(prefixLength);
-        return { start, end: start + token.length, amountText: match[2], unitText: "Stk." };
+        return { start, end: start + token.length, amountText: match[2], unitText: "Stk.", multiplier: 1 };
     }
 
     return null;
@@ -313,6 +341,7 @@ function parseIngredientLine(line) {
     const amountUnit = findAmountUnitInIngredient(rawText);
     if (amountUnit) {
         amount = parseFraction(amountUnit.amountText);
+        if (amount !== null && amount !== undefined && amountUnit.multiplier) amount *= amountUnit.multiplier;
         unit = normalizeIngredientUnit(amountUnit.unitText);
         foodName = `${rawText.slice(0, amountUnit.start)} ${rawText.slice(amountUnit.end)}`;
     }
