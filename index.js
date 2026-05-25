@@ -151,6 +151,7 @@ async function ensureSchema() {
     await addColumnIfMissing("inventory_items", "updated_at", "TEXT DEFAULT ''");
     await addColumnIfMissing("inventory_items", "source", "TEXT DEFAULT 'manual'");
     await addColumnIfMissing("inventory_items", "recipe_match_name", "TEXT DEFAULT ''");
+    await addColumnIfMissing("inventory_items", "calories_per_100g", "REAL");
 
     await addColumnIfMissing("inventory_batches", "item_id", "INTEGER");
     await addColumnIfMissing("inventory_batches", "batch_type", "TEXT DEFAULT 'package'");
@@ -305,8 +306,8 @@ async function syncRecipeIngredients(recipeId, ingredientsText) {
         const existing = await findInventoryItemByName(ingredient.food_name);
         if (!existing) {
             await run(
-                `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name)
-                 VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?)`,
+                `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g)
+                 VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?, NULL)`,
                 [ingredient.food_name, ingredient.unit || "g", ingredient.food_name]
             );
         } else if (!existing.recipe_match_name) {
@@ -377,6 +378,7 @@ function normalizeInventoryRow(item, batches = []) {
         expiry_date: item.expiry_date || "",
         storage_location: item.storage_location || "",
         notes: item.notes || "",
+        calories_per_100g: item.calories_per_100g === null || item.calories_per_100g === undefined ? null : Number(item.calories_per_100g),
         batches: batches.map(normalizeInventoryBatchRow),
         created_at: item.created_at || "",
         updated_at: item.updated_at || ""
@@ -390,11 +392,14 @@ function normalizeName(name) {
 function validateInventoryPayload(payload) {
     const name = normalizeName(payload.name);
     if (!name) return { error: "Bezeichnung ist erforderlich." };
+    const caloriesValue = payload.calories_per_100g === "" || payload.calories_per_100g === null || payload.calories_per_100g === undefined ? null : Number(payload.calories_per_100g);
+    if (caloriesValue !== null && (!Number.isFinite(caloriesValue) || caloriesValue < 0)) return { error: "kcal / 100 g muss eine Zahl größer oder gleich 0 sein." };
     return {
         value: {
             name,
             unit: typeof payload.unit === "string" && payload.unit.trim() ? payload.unit.trim() : "g",
-            notes: typeof payload.notes === "string" ? payload.notes.trim() : ""
+            notes: typeof payload.notes === "string" ? payload.notes.trim() : "",
+            calories_per_100g: caloriesValue
         }
     };
 }
@@ -461,14 +466,20 @@ async function findInventoryItemByName(name) {
     return get(`SELECT * FROM inventory_items WHERE lower(name) = lower(?) LIMIT 1`, [normalizeName(name)]);
 }
 
-async function getOrCreateInventoryItem({ name, unit = "g", notes = "" }) {
+async function getOrCreateInventoryItem({ name, unit = "g", notes = "", calories_per_100g = null }) {
     const cleanName = normalizeName(name);
     let item = await findInventoryItemByName(cleanName);
-    if (item) return item;
+    if (item) {
+        if ((item.calories_per_100g === null || item.calories_per_100g === undefined) && calories_per_100g !== null && calories_per_100g !== undefined) {
+            await run(`UPDATE inventory_items SET calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [calories_per_100g, item.id]);
+            item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [item.id]);
+        }
+        return item;
+    }
     const result = await run(
-        `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes)
-         VALUES (?, 0, ?, 0, '', '', ?)`,
-        [cleanName, unit || "g", notes || ""]
+        `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, calories_per_100g)
+         VALUES (?, 0, ?, 0, '', '', ?, ?)`,
+        [cleanName, unit || "g", notes || "", calories_per_100g]
     );
     return get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
 }
@@ -784,8 +795,8 @@ app.get("/inventory/suggestions", async (req, res) => {
     try {
         const q = normalizeName(req.query.q || "");
         const rows = q
-            ? await all(`SELECT id, name, unit FROM inventory_items WHERE name LIKE ? ORDER BY name COLLATE NOCASE ASC LIMIT 10`, [`%${q}%`])
-            : await all(`SELECT id, name, unit FROM inventory_items ORDER BY name COLLATE NOCASE ASC LIMIT 10`);
+            ? await all(`SELECT id, name, unit, calories_per_100g FROM inventory_items WHERE name LIKE ? ORDER BY name COLLATE NOCASE ASC LIMIT 10`, [`%${q}%`])
+            : await all(`SELECT id, name, unit, calories_per_100g FROM inventory_items ORDER BY name COLLATE NOCASE ASC LIMIT 10`);
         res.json(rows);
     } catch (error) {
         console.error("Fehler bei GET /inventory/suggestions:", error.message);
@@ -851,7 +862,7 @@ app.put("/inventory/:id", async (req, res) => {
         if (validation.error) return res.status(400).json({ error: validation.error });
         const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
-        await run(`UPDATE inventory_items SET name = ?, unit = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [validation.value.name, validation.value.unit, validation.value.notes, req.params.id]);
+        await run(`UPDATE inventory_items SET name = ?, unit = ?, notes = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [validation.value.name, validation.value.unit, validation.value.notes, validation.value.calories_per_100g, req.params.id]);
         await recalculateInventoryItem(req.params.id);
         const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         const batches = await getInventoryBatches(req.params.id);
