@@ -237,37 +237,65 @@ function convertIngredientAmount(amount, unit) {
 }
 
 function cleanIngredientName(value) {
+    const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
+    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
+
     return String(value || "")
-        .replace(/\([^)]*\)/g, "")
-        .replace(/[,;].*$/, "")
-        .replace(/\b(frisch|gekühlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\b/gi, "")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
+        .replace(/[,;]/g, " ")
+        .replace(/\b(frisch|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\b/gi, "")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+function findAmountUnitInIngredient(rawText) {
+    const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
+    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
+    const amountUnitRegex = new RegExp(`(^|[\\s,(])(${amountPattern})\\s*(${unitPattern})\\b`, "i");
+    const unitAmountRegex = new RegExp(`(^|[\\s,(])(${unitPattern})\\s*(${amountPattern})\\b`, "i");
+
+    let match = rawText.match(amountUnitRegex);
+    if (match) {
+        const prefixLength = match[1] ? match[1].length : 0;
+        const start = match.index + prefixLength;
+        const token = match[0].slice(prefixLength);
+        return { start, end: start + token.length, amountText: match[2], unitText: match[3] };
+    }
+
+    match = rawText.match(unitAmountRegex);
+    if (match) {
+        const prefixLength = match[1] ? match[1].length : 0;
+        const start = match.index + prefixLength;
+        const token = match[0].slice(prefixLength);
+        return { start, end: start + token.length, amountText: match[3], unitText: match[2] };
+    }
+
+    const amountOnlyRegex = new RegExp(`(^|[\\s,(])(${amountPattern})(?=\\s|$)`, "i");
+    match = rawText.match(amountOnlyRegex);
+    if (match) {
+        const prefixLength = match[1] ? match[1].length : 0;
+        const start = match.index + prefixLength;
+        const token = match[0].slice(prefixLength);
+        return { start, end: start + token.length, amountText: match[2], unitText: "Stk." };
+    }
+
+    return null;
 }
 
 function parseIngredientLine(line) {
     const rawText = normalizeIngredientText(line);
     if (!rawText) return null;
 
-    const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
-    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
-
     let amount = null;
     let unit = "";
     let foodName = rawText;
 
-    let match = rawText.match(new RegExp(`^(${amountPattern})\\s*(${unitPattern})\\b\\s*(.+)$`, "i"));
-    if (match) {
-        amount = parseFraction(match[1]);
-        unit = normalizeIngredientUnit(match[2]);
-        foodName = match[3];
-    } else {
-        match = rawText.match(new RegExp(`^(${amountPattern})\\s+(.+)$`, "i"));
-        if (match) {
-            amount = parseFraction(match[1]);
-            unit = "Stk.";
-            foodName = match[2];
-        }
+    const amountUnit = findAmountUnitInIngredient(rawText);
+    if (amountUnit) {
+        amount = parseFraction(amountUnit.amountText);
+        unit = normalizeIngredientUnit(amountUnit.unitText);
+        foodName = `${rawText.slice(0, amountUnit.start)} ${rawText.slice(amountUnit.end)}`;
     }
 
     foodName = cleanIngredientName(foodName);
