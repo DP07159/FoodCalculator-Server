@@ -236,20 +236,106 @@ function convertIngredientAmount(amount, unit) {
     return amount;
 }
 
+const INGREDIENT_CANONICAL_ALIASES = new Map([
+    ["thunfischstuecke", "thunfisch"],
+    ["thunfischstucke", "thunfisch"],
+    ["thunfischfilet", "thunfisch"],
+    ["thunfischfilets", "thunfisch"],
+    ["tunfisch", "thunfisch"],
+    ["kidneybohne", "kidneybohnen"],
+    ["kidneybohnen", "kidneybohnen"],
+    ["kidney bohne", "kidneybohnen"],
+    ["kidney bohnen", "kidneybohnen"],
+    ["kichererbse", "kichererbsen"],
+    ["kichererbsen", "kichererbsen"],
+    ["tomate", "tomaten"],
+    ["tomaten", "tomaten"],
+    ["zwiebel", "zwiebeln"],
+    ["zwiebeln", "zwiebeln"],
+    ["ei", "eier"],
+    ["eier", "eier"]
+]);
+
+function normalizeGermanText(value) {
+    return String(value || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/ß/g, "ss")
+        .replace(/ä/g, "ae")
+        .replace(/ö/g, "oe")
+        .replace(/ü/g, "ue");
+}
+
+function removeIngredientDescriptors(value) {
+    return String(value || "")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(/\b(?:in|mit)\s+(?:eigenem\s+saft|saft|wasser|oel|öl|lake|tomatensauce)\b/gi, " ")
+        .replace(/\b(?:abgetropft|abtropfgewicht|netto|einwaage|fuellmenge|füllmenge|natur|naturell|frisch|frische|frischer|frisches|getrocknet|gekocht|vorgekocht|roh|gehackt|geschnitten|gewuerfelt|gewürfelt|gerieben|optional|ca|circa|etwa|nach\s+geschmack)\b/gi, " ")
+        .replace(/[,;:/]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function canonicalizeIngredientName(value) {
+    let text = normalizeGermanText(removeIngredientDescriptors(value))
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .replace(/-/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!text) return "";
+
+    const words = text.split(" ").filter(Boolean).map(word => INGREDIENT_CANONICAL_ALIASES.get(word) || word);
+    text = words.join(" ");
+
+    for (const [alias, canonical] of INGREDIENT_CANONICAL_ALIASES.entries()) {
+        const pattern = new RegExp(`(^|\\s)${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|$)`, "g");
+        text = text.replace(pattern, `$1${canonical}`);
+    }
+
+    return singularizeCanonicalName(text).trim();
+}
+
+function singularizeCanonicalName(value) {
+    return String(value || "")
+        .split(" ")
+        .map(word => {
+            if (INGREDIENT_CANONICAL_ALIASES.has(word)) return INGREDIENT_CANONICAL_ALIASES.get(word);
+            if (word.length <= 4) return word;
+            if (word.endsWith("innen")) return word.slice(0, -5);
+            if (word.endsWith("ungen")) return word.slice(0, -5);
+            if (word.endsWith("en") && word.length > 5) return word.slice(0, -2);
+            if (word.endsWith("er") && word.length > 5) return word.slice(0, -2);
+            if (word.endsWith("n") && word.length > 5) return word.slice(0, -1);
+            if (word.endsWith("e") && word.length > 5) return word.slice(0, -1);
+            if (word.endsWith("s") && word.length > 5) return word.slice(0, -1);
+            return word;
+        })
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function displayIngredientNameFromCanonical(value, fallback) {
+    const text = String(value || "").trim();
+    if (!text) return fallback || "";
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function cleanIngredientName(value) {
     const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
     const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
 
-    return String(value || "")
+    const cleaned = String(value || "")
         .replace(/\([^)]*\)/g, " ")
         .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])(${unitPattern})\\s*${amountPattern}\\b`, "gi"), " ")
-        .replace(/[,;:/]/g, " ")
-        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ")
-        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack|abtropfgewicht|abgetropft|netto|einwaage|füllmenge|fuellmenge)\b/gi, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ");
+
+    const canonical = canonicalizeIngredientName(cleaned);
+    return displayIngredientNameFromCanonical(canonical, removeIngredientDescriptors(cleaned));
 }
 
 function findAmountUnitMatches(rawText, unitPattern) {
@@ -408,16 +494,7 @@ async function syncAllRecipeIngredients() {
 
 
 function normalizeComparableName(value) {
-    return String(value || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/ß/g, "ss")
-        .replace(/\([^)]*\)/g, " ")
-        .replace(/[^a-z0-9äöüÄÖÜß\s-]/gi, " ")
-        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach|geschmack|ca|circa|etwa)\b/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+    return canonicalizeIngredientName(value);
 }
 
 function singularizeComparableName(value) {
