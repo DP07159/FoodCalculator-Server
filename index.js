@@ -75,6 +75,30 @@ async function ensureSchema() {
     await addColumnIfMissing("recipes", "is_favorite", "INTEGER DEFAULT 0");
 
     await run(`
+        CREATE TABLE IF NOT EXISTS recipe_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL,
+            raw_text TEXT DEFAULT '',
+            food_name TEXT NOT NULL,
+            amount REAL,
+            unit TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
+        )
+    `);
+
+    await addColumnIfMissing("recipe_ingredients", "recipe_id", "INTEGER");
+    await addColumnIfMissing("recipe_ingredients", "raw_text", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipe_ingredients", "food_name", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipe_ingredients", "amount", "REAL");
+    await addColumnIfMissing("recipe_ingredients", "unit", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipe_ingredients", "sort_order", "INTEGER DEFAULT 0");
+    await addColumnIfMissing("recipe_ingredients", "created_at", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipe_ingredients", "updated_at", "TEXT DEFAULT ''");
+
+    await run(`
         CREATE TABLE IF NOT EXISTS meal_plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -125,6 +149,8 @@ async function ensureSchema() {
     await addColumnIfMissing("inventory_items", "notes", "TEXT DEFAULT ''");
     await addColumnIfMissing("inventory_items", "created_at", "TEXT DEFAULT ''");
     await addColumnIfMissing("inventory_items", "updated_at", "TEXT DEFAULT ''");
+    await addColumnIfMissing("inventory_items", "source", "TEXT DEFAULT 'manual'");
+    await addColumnIfMissing("inventory_items", "recipe_match_name", "TEXT DEFAULT ''");
 
     await addColumnIfMissing("inventory_batches", "item_id", "INTEGER");
     await addColumnIfMissing("inventory_batches", "batch_type", "TEXT DEFAULT 'package'");
@@ -142,6 +168,7 @@ async function ensureSchema() {
 
     await backfillInventoryBatchDefaults();
     await migrateInventoryBatches();
+    await syncAllRecipeIngredients();
 }
 
 function parseMealTypes(value) {
@@ -152,6 +179,153 @@ function parseMealTypes(value) {
         return Array.isArray(parsed) ? parsed : [];
     } catch {
         return [];
+    }
+}
+
+function normalizeIngredientText(value) {
+    return String(value || "")
+        .replace(/^[-•*]\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function parseFraction(value) {
+    const text = String(value || "").trim().replace(",", ".");
+    const fractionMap = { "¼": 0.25, "½": 0.5, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3 };
+    if (fractionMap[text] !== undefined) return fractionMap[text];
+    if (/^\d+\/\d+$/.test(text)) {
+        const [a, b] = text.split("/").map(Number);
+        return b ? a / b : null;
+    }
+    if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+    const mixed = text.match(/^(\d+)\s+(\d+)\/(\d+)$/);
+    if (mixed) return Number(mixed[1]) + (Number(mixed[2]) / Number(mixed[3]));
+    return null;
+}
+
+function normalizeIngredientUnit(unit) {
+    const clean = String(unit || "").trim().toLowerCase().replace(".", "");
+    const aliases = {
+        g: "g", gr: "g", gramm: "g",
+        kg: "kg", kilogramm: "kg",
+        ml: "ml", milliliter: "ml",
+        l: "l", liter: "l",
+        stk: "Stk.", stück: "Stk.", stueck: "Stk.", ei: "Stk.", eier: "Stk.",
+        dose: "Dose", dosen: "Dose",
+        glas: "Glas", glaeser: "Glas", gläser: "Glas",
+        packung: "Packung", packungen: "Packung", pkg: "Packung",
+        el: "EL", esslöffel: "EL", essloeffel: "EL",
+        tl: "TL", teelöffel: "TL", teeloeffel: "TL",
+        prise: "Prise", prisen: "Prise"
+    };
+    return aliases[clean] || unit || "";
+}
+
+function unitForInventory(unit) {
+    const normalized = normalizeIngredientUnit(unit);
+    if (normalized === "kg" || normalized === "g") return "g";
+    if (normalized === "l" || normalized === "ml") return "ml";
+    return "Stk.";
+}
+
+function convertIngredientAmount(amount, unit) {
+    if (amount === null || amount === undefined) return null;
+    const normalized = normalizeIngredientUnit(unit);
+    if (normalized === "kg" || normalized === "l") return amount * 1000;
+    return amount;
+}
+
+function cleanIngredientName(value) {
+    return String(value || "")
+        .replace(/\([^)]*\)/g, "")
+        .replace(/[,;].*$/, "")
+        .replace(/\b(frisch|gekühlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack)\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function parseIngredientLine(line) {
+    const rawText = normalizeIngredientText(line);
+    if (!rawText) return null;
+
+    const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
+    const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
+
+    let amount = null;
+    let unit = "";
+    let foodName = rawText;
+
+    let match = rawText.match(new RegExp(`^(${amountPattern})\\s*(${unitPattern})\\b\\s*(.+)$`, "i"));
+    if (match) {
+        amount = parseFraction(match[1]);
+        unit = normalizeIngredientUnit(match[2]);
+        foodName = match[3];
+    } else {
+        match = rawText.match(new RegExp(`^(${amountPattern})\\s+(.+)$`, "i"));
+        if (match) {
+            amount = parseFraction(match[1]);
+            unit = "Stk.";
+            foodName = match[2];
+        }
+    }
+
+    foodName = cleanIngredientName(foodName);
+    if (!foodName || foodName.length < 2) return null;
+
+    const inventoryUnit = unitForInventory(unit);
+    const normalizedAmount = convertIngredientAmount(amount, unit);
+
+    return {
+        raw_text: rawText,
+        food_name: foodName,
+        amount: normalizedAmount,
+        unit: inventoryUnit || normalizeIngredientUnit(unit) || "",
+        original_unit: normalizeIngredientUnit(unit)
+    };
+}
+
+function parseIngredientsText(ingredientsText) {
+    return String(ingredientsText || "")
+        .split(/\n|\r|;/)
+        .map(parseIngredientLine)
+        .filter(Boolean);
+}
+
+async function syncRecipeIngredients(recipeId, ingredientsText) {
+    await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipeId]);
+    const parsedIngredients = parseIngredientsText(ingredientsText);
+
+    for (const [index, ingredient] of parsedIngredients.entries()) {
+        await run(
+            `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            [recipeId, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index]
+        );
+
+        const existing = await findInventoryItemByName(ingredient.food_name);
+        if (!existing) {
+            await run(
+                `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name)
+                 VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?)`,
+                [ingredient.food_name, ingredient.unit || "g", ingredient.food_name]
+            );
+        } else if (!existing.recipe_match_name) {
+            await run(
+                `UPDATE inventory_items
+                 SET recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
+                     source = CASE WHEN source = '' OR source IS NULL THEN 'recipe' ELSE source END,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [ingredient.food_name, existing.id]
+            );
+        }
+    }
+}
+
+async function syncAllRecipeIngredients() {
+    const recipes = await all(`SELECT id, ingredients FROM recipes`);
+    for (const recipe of recipes) {
+        await syncRecipeIngredients(recipe.id, recipe.ingredients || "");
     }
 }
 
@@ -415,8 +589,11 @@ app.get("/", (req, res) => res.json({ status: "ok", service: "Food Calculator AP
 app.get("/check-db", async (req, res) => {
     try {
         const recipes = await all(`PRAGMA table_info(recipes)`);
+        const recipeIngredients = await all(`PRAGMA table_info(recipe_ingredients)`);
         const mealPlans = await all(`PRAGMA table_info(meal_plans)`);
-        res.json({ recipes, mealPlans });
+        const inventoryItems = await all(`PRAGMA table_info(inventory_items)`);
+        const inventoryBatches = await all(`PRAGMA table_info(inventory_batches)`);
+        res.json({ recipes, recipeIngredients, mealPlans, inventoryItems, inventoryBatches });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -464,6 +641,7 @@ app.post("/recipes", async (req, res) => {
         );
 
         const created = await get(`SELECT * FROM recipes WHERE id = ?`, [result.lastID]);
+        await syncRecipeIngredients(created.id, created.ingredients || "");
         res.status(201).json(normalizeRecipeRow(created));
     } catch (error) {
         console.error("Fehler bei POST /recipes:", error.message);
@@ -504,6 +682,7 @@ app.put("/recipes/:id", async (req, res) => {
         );
 
         const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        await syncRecipeIngredients(updated.id, updated.ingredients || "");
         res.json(normalizeRecipeRow(updated));
     } catch (error) {
         console.error("Fehler bei PUT /recipes/:id:", error.message);
@@ -528,6 +707,7 @@ app.patch("/recipes/:id/favorite", async (req, res) => {
 
 app.delete("/recipes/:id", async (req, res) => {
     try {
+        await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [req.params.id]);
         const result = await run(`DELETE FROM recipes WHERE id = ?`, [req.params.id]);
         if (result.changes === 0) return res.status(404).json({ error: "Rezept nicht gefunden" });
         res.json({ success: true });
@@ -798,63 +978,6 @@ app.patch("/inventory/:id/adjust", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei PATCH /inventory/:id/adjust:", error.message);
         res.status(500).json({ error: error.message || "Fehler beim Anpassen des Inventarbestands" });
-    }
-});
-
-
-app.patch("/inventory/:id/stock-profile/meta", async (req, res) => {
-    try {
-        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
-        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
-
-        const mode = req.body?.mode === "package" ? "package" : req.body?.mode === "loose" ? "loose" : "";
-        if (!mode) return res.status(400).json({ error: "Positionstyp ist erforderlich." });
-
-        const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
-        const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
-        const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
-        const newStorageLocation = typeof req.body.new_storage_location === "string" ? req.body.new_storage_location.trim() : "";
-        const newExpiryDate = typeof req.body.new_expiry_date === "string" ? req.body.new_expiry_date : "";
-
-        let result;
-        if (mode === "package") {
-            const unitWeight = Number(req.body?.unitWeight);
-            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
-                return res.status(400).json({ error: "Ungültige Einheit." });
-            }
-            result = await run(
-                `UPDATE inventory_batches
-                 SET storage_location = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE item_id = ?
-                   AND batch_type = 'package'
-                   AND unit_weight = ?
-                   AND measure_unit = ?
-                   AND storage_location = ?
-                   AND expiry_date = ?`,
-                [newStorageLocation, newExpiryDate, item.id, unitWeight, measureUnit, storageLocation, expiryDate]
-            );
-        } else {
-            result = await run(
-                `UPDATE inventory_batches
-                 SET storage_location = ?, expiry_date = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE item_id = ?
-                   AND batch_type = 'loose'
-                   AND measure_unit = ?
-                   AND storage_location = ?
-                   AND expiry_date = ?`,
-                [newStorageLocation, newExpiryDate, item.id, measureUnit, storageLocation, expiryDate]
-            );
-        }
-
-        if (result.changes === 0) return res.status(404).json({ error: "Position nicht gefunden." });
-
-        await recalculateInventoryItem(item.id);
-        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [item.id]);
-        const updatedBatches = await getInventoryBatches(item.id);
-        res.json(normalizeInventoryRow(updated, updatedBatches));
-    } catch (error) {
-        console.error("Fehler bei PATCH /inventory/:id/stock-profile/meta:", error.message);
-        res.status(500).json({ error: error.message || "Fehler beim Aktualisieren der Bestandsposition" });
     }
 });
 
