@@ -124,6 +124,17 @@ async function ensureSchema() {
     `);
 
     await run(`
+        CREATE TABLE IF NOT EXISTS admin_ignored_duplicate_pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id_a INTEGER NOT NULL,
+            item_id_b INTEGER NOT NULL,
+            canonical_key TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(item_id_a, item_id_b)
+        )
+    `);
+
+    await run(`
         CREATE TABLE IF NOT EXISTS meal_plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -1357,6 +1368,41 @@ function isInventoryItemProtected(item, recipeUsageByCanonical) {
     return getInventoryStockTotal(item) > 0 || String(item?.source || "manual") !== "recipe" || Boolean(recipeUsageByCanonical.get(canonical));
 }
 
+function normalizeDuplicatePairIds(idA, idB) {
+    const a = Number(idA);
+    const b = Number(idB);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) return null;
+    return a < b ? [a, b] : [b, a];
+}
+
+async function deleteInventoryItemCompletely(itemId) {
+    const id = Number(itemId);
+    if (!Number.isFinite(id)) throw new Error("Ungültiger Artikel.");
+    const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [id]);
+    if (!item) throw new Error("Artikel nicht gefunden.");
+
+    const foodItemId = item.food_item_id ? Number(item.food_item_id) : null;
+
+    await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [id]);
+    await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a = ? OR item_id_b = ?`, [id, id]);
+    await run(`DELETE FROM inventory_items WHERE id = ?`, [id]);
+
+    if (foodItemId) {
+        // Parsed recipe rows are derived data. They must not keep a hard pointer to a deleted admin item.
+        await run(`UPDATE recipe_ingredients SET food_item_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE food_item_id = ?`, [foodItemId]);
+
+        const otherInventory = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? LIMIT 1`, [foodItemId]);
+        const linkedRecipe = await get(`SELECT id FROM recipe_ingredients WHERE food_item_id = ? LIMIT 1`, [foodItemId]);
+
+        if (!otherInventory && !linkedRecipe) {
+            await run(`DELETE FROM food_aliases WHERE food_item_id = ?`, [foodItemId]);
+            await run(`DELETE FROM food_items WHERE id = ?`, [foodItemId]);
+        }
+    }
+
+    return { id, name: item.name };
+}
+
 async function buildInventoryCleanupPreview() {
     const inventoryItems = await getAllInventoryItemsWithBatches();
     const recipeIngredientRows = await all(`
@@ -1365,6 +1411,8 @@ async function buildInventoryCleanupPreview() {
         LEFT JOIN recipes r ON r.id = ri.recipe_id
         ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC
     `);
+    const ignoredPairs = await all(`SELECT * FROM admin_ignored_duplicate_pairs`);
+    const ignoredPairKeys = new Set(ignoredPairs.map(row => `${row.item_id_a}:${row.item_id_b}`));
 
     const recipeUsageByCanonical = new Map();
     for (const row of recipeIngredientRows) {
@@ -1384,6 +1432,10 @@ async function buildInventoryCleanupPreview() {
         const stockTotal = getInventoryStockTotal(item);
         const usedInRecipes = recipeUsageByCanonical.get(canonical) || [];
         const source = String(item.source || "manual");
+        const protectionReasons = [];
+        if (stockTotal > 0) protectionReasons.push("Bestand vorhanden");
+        if (source !== "recipe") protectionReasons.push("manuell gepflegt");
+        if (usedInRecipes.length > 0) protectionReasons.push("in Rezepten verwendet");
         return {
             id: item.id,
             name: item.name,
@@ -1392,7 +1444,9 @@ async function buildInventoryCleanupPreview() {
             stock_total: stockTotal,
             has_stock: stockTotal > 0,
             used_in_recipes: usedInRecipes,
-            is_protected: stockTotal > 0 || source !== "recipe" || usedInRecipes.length > 0
+            is_protected: protectionReasons.length > 0,
+            protection_reasons: protectionReasons.length ? protectionReasons : ["automatisch erzeugt, ohne aktiven Schutz"],
+            calories_per_100g: item.calories_per_100g === null || item.calories_per_100g === undefined ? null : Number(item.calories_per_100g)
         };
     });
 
@@ -1407,17 +1461,25 @@ async function buildInventoryCleanupPreview() {
     const possibleDuplicates = Array.from(groups.entries())
         .filter(([, items]) => items.length > 1)
         .map(([canonical_key, items]) => {
-            const preferred = [...items].sort((a, b) => {
+            const activeItems = items.filter(item => true);
+            const pair = activeItems.length === 2 ? normalizeDuplicatePairIds(activeItems[0].id, activeItems[1].id) : null;
+            const isIgnored = Boolean(pair && ignoredPairKeys.has(`${pair[0]}:${pair[1]}`));
+            const preferred = [...activeItems].sort((a, b) => {
                 if (a.has_stock !== b.has_stock) return a.has_stock ? -1 : 1;
                 if (a.source !== b.source) return a.source === "manual" ? -1 : 1;
                 return String(a.name || "").length - String(b.name || "").length;
             })[0];
+            const deleteCandidates = activeItems.filter(item => Number(item.id) !== Number(preferred.id));
             return {
                 canonical_key,
+                ignored: isIgnored,
                 suggested_master: preferred,
-                candidates: items
+                suggested_delete_candidates: deleteCandidates,
+                candidates: activeItems,
+                reason: "Gleicher normalisierter Lebensmittel-Schlüssel. Bitte fachlich prüfen, ob beide wirklich denselben Artikel meinen."
             };
-        });
+        })
+        .filter(group => !group.ignored);
 
     const orphanRecipeItems = enrichedItems.filter(item =>
         item.source === "recipe" && !item.has_stock && item.used_in_recipes.length === 0
@@ -1433,9 +1495,11 @@ async function buildInventoryCleanupPreview() {
             orphan_recipe_items: orphanRecipeItems.length,
             protected_items: protectedItems.length
         },
+        inventory_items: enrichedItems,
         possible_duplicates: possibleDuplicates,
         orphan_recipe_items: orphanRecipeItems,
-        protected_items: protectedItems
+        protected_items: protectedItems,
+        ignored_duplicate_pairs: ignoredPairs
     };
 }
 
@@ -1881,6 +1945,38 @@ app.post("/admin/inventory-cleanup-apply", async (req, res) => {
         res.status(500).json({ error: "Inventar-Bereinigung konnte nicht ausgeführt werden." });
     }
 });
+
+app.delete("/admin/inventory-items/:id", async (req, res) => {
+    try {
+        const deleted = await deleteInventoryItemCompletely(req.params.id);
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, deleted_item: deleted, preview });
+    } catch (error) {
+        console.error("Fehler bei DELETE /admin/inventory-items/:id:", error.message);
+        res.status(500).json({ error: error.message || "Artikel konnte nicht gelöscht werden." });
+    }
+});
+
+app.post("/admin/duplicate-keep-both", async (req, res) => {
+    try {
+        const pair = normalizeDuplicatePairIds(req.body?.item_id_a, req.body?.item_id_b);
+        if (!pair) return res.status(400).json({ error: "Zwei unterschiedliche Artikel sind erforderlich." });
+        const itemA = await get(`SELECT * FROM inventory_items WHERE id = ?`, [pair[0]]);
+        const itemB = await get(`SELECT * FROM inventory_items WHERE id = ?`, [pair[1]]);
+        if (!itemA || !itemB) return res.status(404).json({ error: "Mindestens ein Artikel wurde nicht gefunden." });
+        const canonicalKey = itemA.canonical_name || itemB.canonical_name || buildFoodIdentity(itemA.name || itemB.name).canonical_key || "";
+        await run(
+            `INSERT OR IGNORE INTO admin_ignored_duplicate_pairs (item_id_a, item_id_b, canonical_key) VALUES (?, ?, ?)`,
+            [pair[0], pair[1], canonicalKey]
+        );
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, ignored_pair: { item_id_a: pair[0], item_id_b: pair[1] }, preview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/duplicate-keep-both:", error.message);
+        res.status(500).json({ error: "Dubletten-Entscheidung konnte nicht gespeichert werden." });
+    }
+});
+
 
 ensureSchema()
     .then(() => {
