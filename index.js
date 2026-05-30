@@ -1713,17 +1713,66 @@ app.put("/inventory/:id", async (req, res) => {
     try {
         const validation = validateInventoryPayload(req.body);
         if (validation.error) return res.status(400).json({ error: validation.error });
+
         const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
-        const foodItem = await getOrCreateFoodItem(validation.value.name, { calories_per_100g: validation.value.calories_per_100g });
-        await run(`UPDATE inventory_items SET name = ?, unit = ?, notes = ?, calories_per_100g = ?, food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [foodItem.display_name || validation.value.name, validation.value.unit, validation.value.notes, validation.value.calories_per_100g, foodItem.id, foodItem.canonical_key, req.params.id]);
+
+        const identity = buildFoodIdentity(validation.value.name);
+        const canonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
+        if (!canonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
+
+        let foodItem = null;
+
+        if (existing.food_item_id) {
+            const conflictingFoodItem = await get(
+                `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
+                [canonicalKey, existing.food_item_id]
+            );
+
+            if (conflictingFoodItem) {
+                // Falls die neue Bezeichnung bereits zu einem anderen Stammdatensatz gehört,
+                // verknüpfen wir den Inventarartikel damit, ohne die vom User eingegebene Anzeige zu überschreiben.
+                foodItem = conflictingFoodItem;
+            } else {
+                await run(
+                    `UPDATE food_items
+                     SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?`,
+                    [validation.value.name, canonicalKey, validation.value.calories_per_100g, existing.food_item_id]
+                );
+                foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
+            }
+        } else {
+            foodItem = await getOrCreateFoodItem(validation.value.name, {
+                calories_per_100g: validation.value.calories_per_100g
+            });
+        }
+
+        await addFoodAlias(foodItem.id, existing.name);
+        await addFoodAlias(foodItem.id, validation.value.name);
+
+        await run(
+            `UPDATE inventory_items
+             SET name = ?, unit = ?, notes = ?, calories_per_100g = ?, food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+                validation.value.name,
+                validation.value.unit,
+                validation.value.notes,
+                validation.value.calories_per_100g,
+                foodItem.id,
+                foodItem.canonical_key || canonicalKey,
+                req.params.id
+            ]
+        );
+
         await recalculateInventoryItem(req.params.id);
         const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
         const batches = await getInventoryBatches(req.params.id);
         res.json(normalizeInventoryRow(updated, batches));
     } catch (error) {
         console.error("Fehler bei PUT /inventory/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Aktualisieren des Inventar-Eintrags" });
+        res.status(500).json({ error: error.message || "Fehler beim Aktualisieren des Inventar-Eintrags" });
     }
 });
 
