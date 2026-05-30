@@ -1341,6 +1341,105 @@ app.delete("/meal_plans/:id", async (req, res) => {
 
 
 
+function getInventoryStockTotal(item) {
+    const batches = Array.isArray(item?.batches) ? item.batches : [];
+    const batchTotal = batches.reduce((sum, batch) => {
+        const remainingQuantity = Number(batch.remaining_quantity ?? 0);
+        const remainingWeight = Number(batch.remaining_weight ?? 0);
+        return sum + Math.max(0, remainingQuantity) + Math.max(0, remainingWeight);
+    }, 0);
+    const legacyTotal = Math.max(0, Number(item?.quantity ?? 0)) + Math.max(0, Number(item?.weight ?? 0));
+    return batchTotal + legacyTotal;
+}
+
+function isInventoryItemProtected(item, recipeUsageByCanonical) {
+    const canonical = item?.canonical_name || buildFoodIdentity(item?.name).canonical_key || "";
+    return getInventoryStockTotal(item) > 0 || String(item?.source || "manual") !== "recipe" || Boolean(recipeUsageByCanonical.get(canonical));
+}
+
+async function buildInventoryCleanupPreview() {
+    const inventoryItems = await getAllInventoryItemsWithBatches();
+    const recipeIngredientRows = await all(`
+        SELECT ri.*, r.name AS recipe_name
+        FROM recipe_ingredients ri
+        LEFT JOIN recipes r ON r.id = ri.recipe_id
+        ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC
+    `);
+
+    const recipeUsageByCanonical = new Map();
+    for (const row of recipeIngredientRows) {
+        const canonical = row.canonical_key || buildFoodIdentity(row.food_name || row.raw_text).canonical_key || "";
+        if (!canonical) continue;
+        if (!recipeUsageByCanonical.has(canonical)) recipeUsageByCanonical.set(canonical, []);
+        recipeUsageByCanonical.get(canonical).push({
+            recipe_id: row.recipe_id,
+            recipe_name: row.recipe_name || "Unbenanntes Rezept",
+            raw_text: row.raw_text || "",
+            food_name: row.food_name || ""
+        });
+    }
+
+    const enrichedItems = inventoryItems.map(item => {
+        const canonical = item.canonical_name || buildFoodIdentity(item.name).canonical_key || "";
+        const stockTotal = getInventoryStockTotal(item);
+        const usedInRecipes = recipeUsageByCanonical.get(canonical) || [];
+        const source = String(item.source || "manual");
+        return {
+            id: item.id,
+            name: item.name,
+            canonical_name: canonical,
+            source,
+            stock_total: stockTotal,
+            has_stock: stockTotal > 0,
+            used_in_recipes: usedInRecipes,
+            is_protected: stockTotal > 0 || source !== "recipe" || usedInRecipes.length > 0
+        };
+    });
+
+    const groups = new Map();
+    for (const item of enrichedItems) {
+        const key = item.canonical_name || buildFoodIdentity(item.name).canonical_key || item.name;
+        if (!key) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+    }
+
+    const possibleDuplicates = Array.from(groups.entries())
+        .filter(([, items]) => items.length > 1)
+        .map(([canonical_key, items]) => {
+            const preferred = [...items].sort((a, b) => {
+                if (a.has_stock !== b.has_stock) return a.has_stock ? -1 : 1;
+                if (a.source !== b.source) return a.source === "manual" ? -1 : 1;
+                return String(a.name || "").length - String(b.name || "").length;
+            })[0];
+            return {
+                canonical_key,
+                suggested_master: preferred,
+                candidates: items
+            };
+        });
+
+    const orphanRecipeItems = enrichedItems.filter(item =>
+        item.source === "recipe" && !item.has_stock && item.used_in_recipes.length === 0
+    );
+
+    const protectedItems = enrichedItems.filter(item => item.is_protected);
+
+    return {
+        generated_at: new Date().toISOString(),
+        counts: {
+            inventory_items: enrichedItems.length,
+            possible_duplicates: possibleDuplicates.length,
+            orphan_recipe_items: orphanRecipeItems.length,
+            protected_items: protectedItems.length
+        },
+        possible_duplicates: possibleDuplicates,
+        orphan_recipe_items: orphanRecipeItems,
+        protected_items: protectedItems
+    };
+}
+
+
 app.get("/recipes/by-ingredient/:name", async (req, res) => {
     try {
         const ingredientName = normalizeIngredientText(req.params.name || "");
@@ -1744,6 +1843,42 @@ app.delete("/inventory/:id", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei DELETE /inventory/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Löschen des Inventar-Eintrags" });
+    }
+});
+
+
+app.get("/admin/inventory-cleanup-preview", async (req, res) => {
+    try {
+        const preview = await buildInventoryCleanupPreview();
+        res.json(preview);
+    } catch (error) {
+        console.error("Fehler bei GET /admin/inventory-cleanup-preview:", error.message);
+        res.status(500).json({ error: "Inventar-Bereinigungsanalyse konnte nicht erstellt werden." });
+    }
+});
+
+app.post("/admin/inventory-cleanup-apply", async (req, res) => {
+    try {
+        const deleteIds = Array.isArray(req.body?.delete_item_ids) ? req.body.delete_item_ids.map(Number).filter(Number.isFinite) : [];
+        if (!deleteIds.length) return res.status(400).json({ error: "Keine Artikel zum Löschen ausgewählt." });
+
+        const preview = await buildInventoryCleanupPreview();
+        const allowedIds = new Set(preview.orphan_recipe_items.map(item => Number(item.id)));
+        const safeDeleteIds = deleteIds.filter(id => allowedIds.has(id));
+        if (!safeDeleteIds.length) {
+            return res.status(400).json({ error: "Keine sicher löschbaren Artikel ausgewählt." });
+        }
+
+        for (const id of safeDeleteIds) {
+            await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [id]);
+            await run(`DELETE FROM inventory_items WHERE id = ?`, [id]);
+        }
+
+        const updatedPreview = await buildInventoryCleanupPreview();
+        res.json({ success: true, deleted_item_ids: safeDeleteIds, preview: updatedPreview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/inventory-cleanup-apply:", error.message);
+        res.status(500).json({ error: "Inventar-Bereinigung konnte nicht ausgeführt werden." });
     }
 });
 
