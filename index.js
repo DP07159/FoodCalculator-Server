@@ -1205,15 +1205,42 @@ app.get("/recipes/by-ingredient/:name", async (req, res) => {
     }
 });
 
+function scoreInventoryIngredientMatch(item, ingredientName) {
+    const candidateNames = [item.name, item.recipe_match_name].filter(Boolean);
+    let bestScore = 0;
+
+    for (const candidate of candidateNames) {
+        const candidateComparable = normalizeComparableName(candidate);
+        const ingredientComparable = normalizeComparableName(ingredientName);
+        if (!candidateComparable || !ingredientComparable) continue;
+
+        if (candidateComparable === ingredientComparable) bestScore = Math.max(bestScore, 100);
+        if (comparableNamesMatch(candidate, ingredientName)) bestScore = Math.max(bestScore, 90);
+
+        const candidateTokens = candidateComparable.split(" ").filter(token => token.length >= 3);
+        const ingredientTokens = ingredientComparable.split(" ").filter(token => token.length >= 3);
+        const sharedTokens = ingredientTokens.filter(token => candidateTokens.includes(token));
+
+        if (sharedTokens.length && sharedTokens.length === ingredientTokens.length) bestScore = Math.max(bestScore, 75);
+        if (sharedTokens.length && sharedTokens.length === candidateTokens.length) bestScore = Math.max(bestScore, 70);
+    }
+
+    return bestScore;
+}
+
 app.get("/inventory/by-ingredient/:name", async (req, res) => {
     try {
         const ingredientName = normalizeIngredientText(req.params.name || "");
         if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
 
         const inventoryItems = await getAllInventoryItemsWithBatches();
-        const item = inventoryItems.find(entry => ingredientMatchesName(entry.name, ingredientName) || ingredientMatchesName(entry.recipe_match_name || "", ingredientName));
-        if (!item) return res.status(404).json({ error: "Kein passender Inventarartikel gefunden." });
-        res.json(item);
+        const rankedItems = inventoryItems
+            .map(item => ({ item, score: scoreInventoryIngredientMatch(item, ingredientName) }))
+            .filter(entry => entry.score >= 70)
+            .sort((a, b) => b.score - a.score || String(a.item.name || "").localeCompare(String(b.item.name || ""), "de"));
+
+        if (!rankedItems.length) return res.status(404).json({ error: "Kein passender Inventarartikel gefunden." });
+        res.json(rankedItems[0].item);
     } catch (error) {
         console.error("Fehler bei GET /inventory/by-ingredient/:name:", error.message);
         res.status(500).json({ error: "Inventarartikel zur Zutat konnte nicht geladen werden" });
