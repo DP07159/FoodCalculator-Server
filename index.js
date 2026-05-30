@@ -236,20 +236,106 @@ function convertIngredientAmount(amount, unit) {
     return amount;
 }
 
+const INGREDIENT_CANONICAL_ALIASES = new Map([
+    ["thunfischstuecke", "thunfisch"],
+    ["thunfischstucke", "thunfisch"],
+    ["thunfischfilet", "thunfisch"],
+    ["thunfischfilets", "thunfisch"],
+    ["tunfisch", "thunfisch"],
+    ["kidneybohne", "kidneybohnen"],
+    ["kidneybohnen", "kidneybohnen"],
+    ["kidney bohne", "kidneybohnen"],
+    ["kidney bohnen", "kidneybohnen"],
+    ["kichererbse", "kichererbsen"],
+    ["kichererbsen", "kichererbsen"],
+    ["tomate", "tomaten"],
+    ["tomaten", "tomaten"],
+    ["zwiebel", "zwiebeln"],
+    ["zwiebeln", "zwiebeln"],
+    ["ei", "eier"],
+    ["eier", "eier"]
+]);
+
+function normalizeGermanText(value) {
+    return String(value || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/ß/g, "ss")
+        .replace(/ä/g, "ae")
+        .replace(/ö/g, "oe")
+        .replace(/ü/g, "ue");
+}
+
+function removeIngredientDescriptors(value) {
+    return String(value || "")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(/\b(?:in|mit)\s+(?:eigenem\s+saft|saft|wasser|oel|öl|lake|tomatensauce)\b/gi, " ")
+        .replace(/\b(?:abgetropft|abtropfgewicht|netto|einwaage|fuellmenge|füllmenge|natur|naturell|frisch|frische|frischer|frisches|getrocknet|gekocht|vorgekocht|roh|gehackt|geschnitten|gewuerfelt|gewürfelt|gerieben|optional|ca|circa|etwa|nach\s+geschmack)\b/gi, " ")
+        .replace(/[,;:/]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function canonicalizeIngredientName(value) {
+    let text = normalizeGermanText(removeIngredientDescriptors(value))
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .replace(/-/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!text) return "";
+
+    const words = text.split(" ").filter(Boolean).map(word => INGREDIENT_CANONICAL_ALIASES.get(word) || word);
+    text = words.join(" ");
+
+    for (const [alias, canonical] of INGREDIENT_CANONICAL_ALIASES.entries()) {
+        const pattern = new RegExp(`(^|\\s)${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|$)`, "g");
+        text = text.replace(pattern, `$1${canonical}`);
+    }
+
+    return singularizeCanonicalName(text).trim();
+}
+
+function singularizeCanonicalName(value) {
+    return String(value || "")
+        .split(" ")
+        .map(word => {
+            if (INGREDIENT_CANONICAL_ALIASES.has(word)) return INGREDIENT_CANONICAL_ALIASES.get(word);
+            if (word.length <= 4) return word;
+            if (word.endsWith("innen")) return word.slice(0, -5);
+            if (word.endsWith("ungen")) return word.slice(0, -5);
+            if (word.endsWith("en") && word.length > 5) return word.slice(0, -2);
+            if (word.endsWith("er") && word.length > 5) return word.slice(0, -2);
+            if (word.endsWith("n") && word.length > 5) return word.slice(0, -1);
+            if (word.endsWith("e") && word.length > 5) return word.slice(0, -1);
+            if (word.endsWith("s") && word.length > 5) return word.slice(0, -1);
+            return word;
+        })
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function displayIngredientNameFromCanonical(value, fallback) {
+    const text = String(value || "").trim();
+    if (!text) return fallback || "";
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function cleanIngredientName(value) {
     const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
     const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
 
-    return String(value || "")
+    const cleaned = String(value || "")
         .replace(/\([^)]*\)/g, " ")
         .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])(${unitPattern})\\s*${amountPattern}\\b`, "gi"), " ")
-        .replace(/[,;:/]/g, " ")
-        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ")
-        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach geschmack|abtropfgewicht|abgetropft|netto|einwaage|füllmenge|fuellmenge)\b/gi, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ");
+
+    const canonical = canonicalizeIngredientName(cleaned);
+    return displayIngredientNameFromCanonical(canonical, removeIngredientDescriptors(cleaned));
 }
 
 function findAmountUnitMatches(rawText, unitPattern) {
@@ -408,16 +494,7 @@ async function syncAllRecipeIngredients() {
 
 
 function normalizeComparableName(value) {
-    return String(value || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/ß/g, "ss")
-        .replace(/\([^)]*\)/g, " ")
-        .replace(/[^a-z0-9äöüÄÖÜß\s-]/gi, " ")
-        .replace(/\b(frisch|frische|frischer|frisches|gekuehlt|gekühlt|tiefgekuehlt|tiefgekühlt|gehackt|geschnitten|gerieben|optional|nach|geschmack|ca|circa|etwa)\b/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+    return canonicalizeIngredientName(value);
 }
 
 function singularizeComparableName(value) {
@@ -615,6 +692,23 @@ function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
         label: comparison.status === "available" ? "Vorhanden" : comparison.status === "partial" ? "Teilweise vorhanden" : "Nicht vorhanden",
         note: comparison.note
     };
+}
+
+
+async function getAllInventoryItemsWithBatches() {
+    const inventoryRows = await all(`SELECT * FROM inventory_items ORDER BY name COLLATE NOCASE ASC`);
+    const inventoryItems = [];
+    for (const row of inventoryRows) {
+        const batches = await getInventoryBatches(row.id);
+        inventoryItems.push(normalizeInventoryRow(row, batches));
+    }
+    return inventoryItems;
+}
+
+function ingredientMatchesName(ingredientName, searchName) {
+    return comparableNamesMatch(ingredientName, searchName)
+        || normalizeComparableName(ingredientName).includes(normalizeComparableName(searchName))
+        || normalizeComparableName(searchName).includes(normalizeComparableName(ingredientName));
 }
 
 function normalizeRecipeRow(recipe) {
@@ -1079,6 +1173,53 @@ app.delete("/meal_plans/:id", async (req, res) => {
 });
 
 
+
+app.get("/recipes/by-ingredient/:name", async (req, res) => {
+    try {
+        const ingredientName = normalizeIngredientText(req.params.name || "");
+        if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
+
+        const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
+        const matches = [];
+
+        for (const recipe of recipes) {
+            const parsed = parseIngredientsText(recipe.ingredients || "");
+            const matchedIngredients = parsed.filter(ingredient => ingredientMatchesName(ingredient.food_name, ingredientName));
+            if (matchedIngredients.length) {
+                matches.push({
+                    ...normalizeRecipeRow(recipe),
+                    matched_ingredients: matchedIngredients.map(ingredient => ({
+                        raw_text: ingredient.raw_text,
+                        food_name: ingredient.food_name,
+                        amount: ingredient.amount,
+                        unit: ingredient.unit
+                    }))
+                });
+            }
+        }
+
+        res.json({ ingredient: ingredientName, recipes: matches });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/by-ingredient/:name:", error.message);
+        res.status(500).json({ error: "Rezepte zur Zutat konnten nicht geladen werden" });
+    }
+});
+
+app.get("/inventory/by-ingredient/:name", async (req, res) => {
+    try {
+        const ingredientName = normalizeIngredientText(req.params.name || "");
+        if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
+
+        const inventoryItems = await getAllInventoryItemsWithBatches();
+        const item = inventoryItems.find(entry => ingredientMatchesName(entry.name, ingredientName) || ingredientMatchesName(entry.recipe_match_name || "", ingredientName));
+        if (!item) return res.status(404).json({ error: "Kein passender Inventarartikel gefunden." });
+        res.json(item);
+    } catch (error) {
+        console.error("Fehler bei GET /inventory/by-ingredient/:name:", error.message);
+        res.status(500).json({ error: "Inventarartikel zur Zutat konnte nicht geladen werden" });
+    }
+});
+
 app.get("/recipes/:id/stock-check", async (req, res) => {
     try {
         const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
@@ -1089,12 +1230,7 @@ app.get("/recipes/:id/stock-check", async (req, res) => {
         const displayedPortions = Number.isInteger(requestedPortions) && requestedPortions > 0 ? requestedPortions : basePortions;
         const factor = displayedPortions / basePortions;
 
-        const inventoryRows = await all(`SELECT * FROM inventory_items ORDER BY name COLLATE NOCASE ASC`);
-        const inventoryItems = [];
-        for (const row of inventoryRows) {
-            const batches = await getInventoryBatches(row.id);
-            inventoryItems.push(normalizeInventoryRow(row, batches));
-        }
+        const inventoryItems = await getAllInventoryItemsWithBatches();
 
         const parsedIngredients = parseIngredientsText(recipe.ingredients || "");
         const entries = parsedIngredients.map(ingredient => buildRecipeStockEntry(ingredient, inventoryItems, factor));
@@ -1134,12 +1270,7 @@ app.get("/inventory/suggestions", async (req, res) => {
 
 app.get("/inventory", async (req, res) => {
     try {
-        const rows = await all(`SELECT * FROM inventory_items ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, name COLLATE NOCASE ASC`);
-        const enriched = [];
-        for (const row of rows) {
-            const batches = await getInventoryBatches(row.id);
-            enriched.push(normalizeInventoryRow(row, batches));
-        }
+        const enriched = await getAllInventoryItemsWithBatches();
         res.json(enriched);
     } catch (error) {
         console.error("Fehler bei GET /inventory:", error.message);
