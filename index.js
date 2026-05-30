@@ -99,6 +99,7 @@ async function ensureSchema() {
     await addColumnIfMissing("recipe_ingredients", "updated_at", "TEXT DEFAULT ''");
     await addColumnIfMissing("recipe_ingredients", "food_item_id", "INTEGER");
     await addColumnIfMissing("recipe_ingredients", "canonical_key", "TEXT DEFAULT ''");
+    await addColumnIfMissing("recipe_ingredients", "link_source", "TEXT DEFAULT 'auto_created'");
 
     await run(`
         CREATE TABLE IF NOT EXISTS food_items (
@@ -545,37 +546,87 @@ function parseIngredientsText(ingredientsText) {
         .filter(Boolean);
 }
 
-async function syncRecipeIngredients(recipeId, ingredientsText) {
+async function createDistinctFoodItemFromIngredient(name, { calories_per_100g = null, aliasName = "" } = {}) {
+    const identity = buildFoodIdentity(name);
+    const baseCanonicalKey = identity.canonical_key || canonicalizeIngredientName(name);
+    const displayName = identity.display_name || normalizeName(name);
+    if (!baseCanonicalKey || !displayName) throw new Error("Lebensmittel konnte nicht normalisiert werden.");
+
+    let canonicalKey = baseCanonicalKey;
+    let counter = 1;
+    while (await get(`SELECT id FROM food_items WHERE canonical_key = ? LIMIT 1`, [canonicalKey])) {
+        counter += 1;
+        canonicalKey = `${baseCanonicalKey}__recipe_${Date.now()}_${counter}`;
+    }
+
+    const result = await run(
+        `INSERT INTO food_items (display_name, canonical_key, calories_per_100g) VALUES (?, ?, ?)`,
+        [displayName, canonicalKey, calories_per_100g]
+    );
+    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [result.lastID]);
+    await addFoodAlias(foodItem.id, displayName);
+    await addFoodAlias(foodItem.id, name);
+    if (aliasName) await addFoodAlias(foodItem.id, aliasName);
+    return foodItem;
+}
+
+async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
+    const link = explicitLinks.find(entry => {
+        if (entry.line_index !== index) return false;
+        if (entry.raw_text && rawText && entry.raw_text.trim() !== rawText.trim()) return false;
+        return true;
+    });
+    if (!link) return null;
+    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [link.food_item_id]);
+    return foodItem || null;
+}
+
+async function ensureInventoryItemForFoodItem(foodItem, ingredient, { source = "recipe" } = {}) {
+    const existing = await get(`SELECT * FROM inventory_items WHERE food_item_id = ? LIMIT 1`, [foodItem.id]);
+    if (!existing) {
+        await run(
+            `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
+             VALUES (?, 0, ?, 0, '', '', '', ?, ?, ?, ?, ?)`,
+            [foodItem.display_name || ingredient.food_name, ingredient.unit || "g", source, foodItem.display_name || ingredient.food_name, foodItem.calories_per_100g ?? null, foodItem.id, foodItem.canonical_key]
+        );
+        return;
+    }
+
+    await run(
+        `UPDATE inventory_items
+         SET recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
+             canonical_name = COALESCE(NULLIF(canonical_name, ''), ?),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [foodItem.display_name || ingredient.food_name, foodItem.canonical_key, existing.id]
+    );
+}
+
+async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = []) {
     await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipeId]);
     const parsedIngredients = parseIngredientsText(ingredientsText);
 
     for (const [index, ingredient] of parsedIngredients.entries()) {
-        const foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+        let linkSource = "new_from_recipe";
+        let foodItem = await getSelectedFoodItemForIngredient(explicitLinks, index, ingredient.raw_text);
+
+        if (foodItem) {
+            linkSource = "user_selected";
+            await addFoodAlias(foodItem.id, ingredient.raw_text);
+            await addFoodAlias(foodItem.id, ingredient.food_name);
+        } else {
+            // Wichtig: keine unsichere automatische Zusammenführung.
+            // Wenn der User keinen Vorschlag auswählt, entsteht bewusst ein neuer Lebensmittel-Stammsatz.
+            foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
+        }
+
         await run(
-            `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key)
-             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)`,
-            [recipeId, ingredient.raw_text, foodItem.display_name || ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key]
+            `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key, link_source)
+             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
+            [recipeId, ingredient.raw_text, foodItem.display_name || ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key, linkSource]
         );
 
-        const existing = await findInventoryItemByName(foodItem.display_name || ingredient.food_name);
-        if (!existing) {
-            await run(
-                `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
-                 VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?, NULL, ?, ?)`,
-                [foodItem.display_name || ingredient.food_name, ingredient.unit || "g", foodItem.display_name || ingredient.food_name, foodItem.id, foodItem.canonical_key]
-            );
-        } else {
-            await run(
-                `UPDATE inventory_items
-                 SET recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
-                     source = CASE WHEN source = '' OR source IS NULL THEN 'recipe' ELSE source END,
-                     food_item_id = COALESCE(food_item_id, ?),
-                     canonical_name = COALESCE(NULLIF(canonical_name, ''), ?),
-                     updated_at = CURRENT_TIMESTAMP
-                 WHERE id = ?`,
-                [foodItem.display_name || ingredient.food_name, foodItem.id, foodItem.canonical_key, existing.id]
-            );
-        }
+        await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "user_selected" ? "manual" : "recipe" });
     }
 }
 
@@ -1128,6 +1179,17 @@ function toPositiveInteger(value) {
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function normalizeIngredientLinks(value) {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map(link => ({
+            line_index: Number.parseInt(link.line_index ?? link.index, 10),
+            food_item_id: Number.parseInt(link.food_item_id ?? link.foodItemId, 10),
+            raw_text: typeof link.raw_text === "string" ? link.raw_text : ""
+        }))
+        .filter(link => Number.isInteger(link.line_index) && link.line_index >= 0 && Number.isInteger(link.food_item_id) && link.food_item_id > 0);
+}
+
 function validateRecipePayload(payload, { allowEmptyPortions = false } = {}) {
     const name = typeof payload.name === "string" ? payload.name.trim() : "";
     const calories = toPositiveInteger(payload.calories);
@@ -1149,7 +1211,8 @@ function validateRecipePayload(payload, { allowEmptyPortions = false } = {}) {
             mealTypes,
             ingredients: typeof payload.ingredients === "string" ? payload.ingredients : "",
             instructions: typeof payload.instructions === "string" ? payload.instructions : "",
-            is_favorite: Number(payload.is_favorite) === 1 ? 1 : 0
+            is_favorite: Number(payload.is_favorite) === 1 ? 1 : 0,
+            ingredientLinks: normalizeIngredientLinks(payload.ingredientLinks)
         }
     };
 }
@@ -1169,6 +1232,32 @@ app.get("/check-db", async (req, res) => {
     }
 });
 
+async function getRecipeIngredientLinks(recipeId) {
+    const rows = await all(
+        `SELECT sort_order AS line_index, raw_text, food_name, amount, unit, food_item_id, link_source
+         FROM recipe_ingredients
+         WHERE recipe_id = ?
+         ORDER BY sort_order ASC`,
+        [recipeId]
+    );
+    return rows.map(row => ({
+        line_index: Number(row.line_index) || 0,
+        raw_text: row.raw_text || "",
+        food_name: row.food_name || "",
+        amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+        unit: row.unit || "",
+        food_item_id: row.food_item_id || null,
+        link_source: row.link_source || ""
+    }));
+}
+
+async function normalizeRecipeRowWithIngredientLinks(recipe) {
+    return {
+        ...normalizeRecipeRow(recipe),
+        ingredientLinks: await getRecipeIngredientLinks(recipe.id)
+    };
+}
+
 app.get("/recipes", async (req, res) => {
     try {
         const rows = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
@@ -1183,7 +1272,7 @@ app.get("/recipes/:id", async (req, res) => {
     try {
         const row = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
         if (!row) return res.status(404).json({ error: "Rezept nicht gefunden" });
-        res.json(normalizeRecipeRow(row));
+        res.json(await normalizeRecipeRowWithIngredientLinks(row));
     } catch (error) {
         console.error("Fehler bei GET /recipes/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Laden des Rezepts" });
@@ -1211,8 +1300,8 @@ app.post("/recipes", async (req, res) => {
         );
 
         const created = await get(`SELECT * FROM recipes WHERE id = ?`, [result.lastID]);
-        await syncRecipeIngredients(created.id, created.ingredients || "");
-        res.status(201).json(normalizeRecipeRow(created));
+        await syncRecipeIngredients(created.id, created.ingredients || "", recipe.ingredientLinks);
+        res.status(201).json(await normalizeRecipeRowWithIngredientLinks(created));
     } catch (error) {
         console.error("Fehler bei POST /recipes:", error.message);
         res.status(500).json({ error: "Fehler beim Speichern des Rezepts" });
@@ -1252,8 +1341,8 @@ app.put("/recipes/:id", async (req, res) => {
         );
 
         const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        await syncRecipeIngredients(updated.id, updated.ingredients || "");
-        res.json(normalizeRecipeRow(updated));
+        await syncRecipeIngredients(updated.id, updated.ingredients || "", recipe.ingredientLinks);
+        res.json(await normalizeRecipeRowWithIngredientLinks(updated));
     } catch (error) {
         console.error("Fehler bei PUT /recipes/:id:", error.message);
         res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
@@ -1641,21 +1730,28 @@ app.get("/inventory/suggestions", async (req, res) => {
 
 app.get("/food-items/resolve", async (req, res) => {
     try {
-        const q = normalizeName(req.query.q || "");
-        if (!q) return res.json({ query: q, identity: null, exact: null, suggestions: [] });
-        const identity = buildFoodIdentity(q);
-        const exactFoodItem = await findFoodItemByName(q);
+        const originalQuery = String(req.query.q || "").trim();
+        const parsed = parseIngredientLine(originalQuery);
+        const lookupText = normalizeName(parsed?.food_name || originalQuery);
+        if (!lookupText) return res.json({ query: originalQuery, lookup: lookupText, identity: null, exact: null, suggestions: [] });
+        const identity = buildFoodIdentity(lookupText);
+        const exactFoodItem = await findFoodItemByName(lookupText);
         const suggestions = await all(`
             SELECT fi.id, fi.display_name, fi.canonical_key, fi.calories_per_100g
             FROM food_items fi
             ORDER BY fi.display_name COLLATE NOCASE ASC
         `);
         const ranked = suggestions
-            .map(item => ({ ...item, score: item.canonical_key === identity.canonical_key ? 100 : (comparableNamesMatch(item.display_name, q) ? 75 : 0) }))
+            .map(item => ({
+                ...item,
+                score: item.canonical_key === identity.canonical_key
+                    ? 100
+                    : (comparableNamesMatch(item.display_name, lookupText) ? 75 : 0)
+            }))
             .filter(item => item.score >= 75)
             .sort((a, b) => b.score - a.score || a.display_name.localeCompare(b.display_name, "de"))
             .slice(0, 5);
-        res.json({ query: q, identity, exact: normalizeFoodItemRow(exactFoodItem), suggestions: ranked });
+        res.json({ query: originalQuery, lookup: lookupText, identity, exact: normalizeFoodItemRow(exactFoodItem), suggestions: ranked });
     } catch (error) {
         console.error("Fehler bei GET /food-items/resolve:", error.message);
         res.status(500).json({ error: "Lebensmittel konnte nicht geprüft werden" });
