@@ -1578,6 +1578,113 @@ function normalizeDuplicatePairIds(idA, idB) {
     return a < b ? [a, b] : [b, a];
 }
 
+
+async function ensureFoodItemForInventoryRow(item) {
+    if (!item) throw new Error("Artikel nicht gefunden.");
+    if (item.food_item_id) {
+        const existing = await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]);
+        if (existing) return existing;
+    }
+
+    const foodItem = await getOrCreateFoodItem(item.name, { calories_per_100g: item.calories_per_100g });
+    await run(
+        `UPDATE inventory_items SET food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [foodItem.id, foodItem.canonical_key, item.id]
+    );
+    return foodItem;
+}
+
+async function moveFoodAliasesToMaster(sourceFoodItemId, masterFoodItemId, additionalAliases = []) {
+    const sourceId = Number(sourceFoodItemId);
+    const masterId = Number(masterFoodItemId);
+    if (!Number.isFinite(masterId)) return;
+
+    for (const alias of additionalAliases) {
+        if (alias) await addFoodAlias(masterId, alias);
+    }
+
+    if (!Number.isFinite(sourceId) || sourceId === masterId) return;
+
+    const aliases = await all(`SELECT alias_name FROM food_aliases WHERE food_item_id = ?`, [sourceId]);
+    for (const alias of aliases) {
+        await addFoodAlias(masterId, alias.alias_name);
+    }
+}
+
+async function removeFoodItemIfUnused(foodItemId) {
+    const id = Number(foodItemId);
+    if (!Number.isFinite(id)) return;
+    const linkedInventory = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? LIMIT 1`, [id]);
+    const linkedRecipe = await get(`SELECT id FROM recipe_ingredients WHERE food_item_id = ? LIMIT 1`, [id]);
+    if (linkedInventory || linkedRecipe) return;
+    await run(`DELETE FROM food_aliases WHERE food_item_id = ?`, [id]);
+    await run(`DELETE FROM food_items WHERE id = ?`, [id]);
+}
+
+async function mergeInventoryItems(masterItemId, duplicateItemId) {
+    const masterId = Number(masterItemId);
+    const duplicateId = Number(duplicateItemId);
+    if (!Number.isFinite(masterId) || !Number.isFinite(duplicateId) || masterId === duplicateId) {
+        throw new Error("Zwei unterschiedliche Artikel sind erforderlich.");
+    }
+
+    const master = await get(`SELECT * FROM inventory_items WHERE id = ?`, [masterId]);
+    const duplicate = await get(`SELECT * FROM inventory_items WHERE id = ?`, [duplicateId]);
+    if (!master || !duplicate) throw new Error("Mindestens ein Artikel wurde nicht gefunden.");
+
+    await run("BEGIN");
+    try {
+        const masterFood = await ensureFoodItemForInventoryRow(master);
+        const duplicateFood = await ensureFoodItemForInventoryRow(duplicate);
+
+        await moveFoodAliasesToMaster(duplicateFood.id, masterFood.id, [
+            duplicate.name,
+            duplicate.recipe_match_name,
+            duplicate.canonical_name,
+            duplicateFood.display_name,
+            duplicateFood.canonical_key
+        ]);
+
+        await run(
+            `UPDATE recipe_ingredients
+             SET food_item_id = ?, canonical_key = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE food_item_id = ?`,
+            [masterFood.id, masterFood.canonical_key, duplicateFood.id]
+        );
+
+        await run(
+            `UPDATE inventory_batches SET item_id = ?, updated_at = CURRENT_TIMESTAMP WHERE item_id = ?`,
+            [masterId, duplicateId]
+        );
+
+        await run(
+            `UPDATE inventory_items
+             SET unit = COALESCE(NULLIF(unit, ''), ?),
+                 recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
+                 calories_per_100g = COALESCE(calories_per_100g, ?),
+                 food_item_id = ?,
+                 canonical_name = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [duplicate.unit || "", duplicate.recipe_match_name || duplicate.name || "", duplicate.calories_per_100g ?? null, masterFood.id, masterFood.canonical_key, masterId]
+        );
+
+        await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a IN (?, ?) OR item_id_b IN (?, ?)`, [masterId, duplicateId, masterId, duplicateId]);
+        await run(`DELETE FROM inventory_items WHERE id = ?`, [duplicateId]);
+
+        await removeFoodItemIfUnused(duplicateFood.id);
+
+        await run("COMMIT");
+        return {
+            master_item: { id: masterId, name: master.name },
+            merged_item: { id: duplicateId, name: duplicate.name }
+        };
+    } catch (error) {
+        await run("ROLLBACK");
+        throw error;
+    }
+}
+
 async function deleteInventoryItemCompletely(itemId) {
     const id = Number(itemId);
     if (!Number.isFinite(id)) throw new Error("Ungültiger Artikel.");
@@ -2213,6 +2320,20 @@ app.delete("/admin/inventory-items/:id", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei DELETE /admin/inventory-items/:id:", error.message);
         res.status(500).json({ error: error.message || "Artikel konnte nicht gelöscht werden." });
+    }
+});
+
+
+app.post("/admin/duplicates/merge", async (req, res) => {
+    try {
+        const masterItemId = Number(req.body?.master_item_id);
+        const duplicateItemId = Number(req.body?.duplicate_item_id);
+        const merged = await mergeInventoryItems(masterItemId, duplicateItemId);
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, merged, preview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/duplicates/merge:", error.message);
+        res.status(500).json({ error: error.message || "Dubletten konnten nicht zusammengeführt werden." });
     }
 });
 
