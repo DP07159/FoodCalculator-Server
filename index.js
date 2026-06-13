@@ -209,7 +209,10 @@ async function ensureSchema() {
     await backfillInventoryBatchDefaults();
     await migrateInventoryBatches();
     await migrateFoodItems();
-    await syncAllRecipeIngredients();
+    // Wichtig: Der Rezept-Zutaten-Sync darf beim Serverstart keine bestehenden
+    // Verknüpfungen löschen und neu anlegen. Sonst entstehen bei jedem Neustart
+    // neue Lebensmittel-/Inventarartikel aus denselben Rezeptzutaten.
+    await backfillMissingRecipeIngredientLinks();
 }
 
 function parseMealTypes(value) {
@@ -571,14 +574,44 @@ async function createDistinctFoodItemFromIngredient(name, { calories_per_100g = 
 }
 
 async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
-    const link = explicitLinks.find(entry => {
-        if (entry.line_index !== index) return false;
+    const links = Array.isArray(explicitLinks) ? explicitLinks : [];
+    const link = links.find(entry => {
+        if (Number(entry.line_index) !== Number(index)) return false;
         if (entry.raw_text && rawText && entry.raw_text.trim() !== rawText.trim()) return false;
         return true;
     });
-    if (!link) return null;
+    if (!link || !link.food_item_id) return null;
     const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [link.food_item_id]);
     return foodItem || null;
+}
+
+async function getPreservedFoodItemForIngredient(previousLinks, index, rawText) {
+    const links = Array.isArray(previousLinks) ? previousLinks : [];
+    const raw = String(rawText || "").trim();
+
+    // 1) stärkster Fall: gleiche Zeile und identischer Text
+    let link = links.find(entry =>
+        Number(entry.sort_order) === Number(index) &&
+        String(entry.raw_text || "").trim() === raw &&
+        entry.food_item_id
+    );
+
+    // 2) fallback: identischer Text an anderer Stelle, falls Zeilen verschoben wurden
+    if (!link && raw) {
+        link = links.find(entry =>
+            String(entry.raw_text || "").trim() === raw &&
+            entry.food_item_id
+        );
+    }
+
+    if (!link) return null;
+    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [link.food_item_id]);
+    if (!foodItem) return null;
+
+    return {
+        foodItem,
+        linkSource: link.link_source || "preserved"
+    };
 }
 
 async function ensureInventoryItemForFoodItem(foodItem, ingredient, { source = "recipe" } = {}) {
@@ -602,7 +635,15 @@ async function ensureInventoryItemForFoodItem(foodItem, ingredient, { source = "
     );
 }
 
-async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = []) {
+async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = [], options = {}) {
+    const { createMissing = true } = options;
+    const previousLinks = await all(
+        `SELECT sort_order, raw_text, food_item_id, link_source
+         FROM recipe_ingredients
+         WHERE recipe_id = ?`,
+        [recipeId]
+    );
+
     await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipeId]);
     const parsedIngredients = parseIngredientsText(ingredientsText);
 
@@ -615,6 +656,15 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
             await addFoodAlias(foodItem.id, ingredient.raw_text);
             await addFoodAlias(foodItem.id, ingredient.food_name);
         } else {
+            const preserved = await getPreservedFoodItemForIngredient(previousLinks, index, ingredient.raw_text);
+            if (preserved) {
+                foodItem = preserved.foodItem;
+                linkSource = preserved.linkSource === "new_from_recipe" ? "preserved_recipe" : preserved.linkSource;
+            }
+        }
+
+        if (!foodItem) {
+            if (!createMissing) continue;
             // Wichtig: keine unsichere automatische Zusammenführung.
             // Wenn der User keinen Vorschlag auswählt, entsteht bewusst ein neuer Lebensmittel-Stammsatz.
             foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
@@ -630,12 +680,20 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
     }
 }
 
-async function syncAllRecipeIngredients() {
+async function backfillMissingRecipeIngredientLinks() {
     const recipes = await all(`SELECT id, ingredients FROM recipes`);
     for (const recipe of recipes) {
-        await syncRecipeIngredients(recipe.id, recipe.ingredients || "");
+        const existing = await get(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE recipe_id = ?`, [recipe.id]);
+        if (Number(existing?.count || 0) > 0) continue;
+
+        // Nur wenn ein Rezept noch gar keine strukturierte Zutatenverknüpfung besitzt,
+        // wird einmalig aufgebaut. Bestehende Links werden beim Serverstart nie gelöscht.
+        await syncRecipeIngredients(recipe.id, recipe.ingredients || "", [], { createMissing: true });
     }
 }
+
+// Kompatibilitäts-Alias für ältere interne Aufrufe.
+const syncAllRecipeIngredients = backfillMissingRecipeIngredientLinks;
 
 
 function normalizeComparableName(value) {
