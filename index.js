@@ -233,6 +233,15 @@ function normalizeIngredientText(value) {
         .trim();
 }
 
+function normalizeVisibleFoodName(value) {
+    return String(value || "")
+        .replace(/^[-•*]\s*/, "")
+        .replace(/\([^)]*\)/g, " ")
+        .replace(/[,;:/]+\s*$/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
 function parseFraction(value) {
     const text = String(value || "").trim().replace(",", ".");
     const fractionMap = { "¼": 0.25, "½": 0.5, "¾": 0.75, "⅓": 1 / 3, "⅔": 2 / 3 };
@@ -405,7 +414,9 @@ function buildFoodIdentity(value) {
 
     return {
         canonical_key: canonicalKey,
-        display_name: displayParts.join(" ") || String(value || "").trim()
+        // Wichtig: display_name darf keine automatisch zusammengesetzte/vereinheitlichte
+        // Schreibweise mehr sein. Sichtbare Namen bleiben User-/Rezepttext.
+        display_name: normalizeVisibleFoodName(value)
     };
 }
 
@@ -414,8 +425,7 @@ function canonicalizeIngredientName(value) {
 }
 
 function displayIngredientNameFromCanonical(value, fallback) {
-    const identity = buildFoodIdentity(fallback || value);
-    return identity.display_name || fallback || "";
+    return normalizeVisibleFoodName(fallback || value);
 }
 
 function cleanIngredientName(value) {
@@ -427,10 +437,14 @@ function cleanIngredientName(value) {
         .replace(new RegExp(`\\b(?:a|à)\\s*${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])${amountPattern}\\s*(${unitPattern})\\b`, "gi"), " ")
         .replace(new RegExp(`(^|[\\s,(])(${unitPattern})\\s*${amountPattern}\\b`, "gi"), " ")
-        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ");
+        .replace(/(^|\s)(?:a|à|je|pro)(?=\s|$)/gi, " ")
+        .replace(/[,;:/]+\s*$/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
 
-    const identity = buildFoodIdentity(cleaned);
-    return identity.display_name || removeIngredientDescriptors(cleaned);
+    // Keine sichtbare Vereinheitlichung, keine Singular-/Plural-Korrektur,
+    // keine Entfernung von beschreibenden Namensbestandteilen.
+    return normalizeVisibleFoodName(cleaned);
 }
 
 function findAmountUnitMatches(rawText, unitPattern) {
@@ -552,7 +566,7 @@ function parseIngredientsText(ingredientsText) {
 async function createDistinctFoodItemFromIngredient(name, { calories_per_100g = null, aliasName = "" } = {}) {
     const identity = buildFoodIdentity(name);
     const baseCanonicalKey = identity.canonical_key || canonicalizeIngredientName(name);
-    const displayName = identity.display_name || normalizeName(name);
+    const displayName = normalizeVisibleFoodName(name);
     if (!baseCanonicalKey || !displayName) throw new Error("Lebensmittel konnte nicht normalisiert werden.");
 
     let canonicalKey = baseCanonicalKey;
@@ -765,23 +779,9 @@ function comparableNamesMatch(a, b) {
 }
 
 function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
-    if (!parsedIngredient) return parsedIngredient;
-    const rawComparable = normalizeComparableName(parsedIngredient.raw_text);
-    const parsedComparable = normalizeComparableName(parsedIngredient.food_name);
-
-    const candidates = inventoryItems
-        .flatMap(item => [item.name, item.recipe_match_name].filter(Boolean).map(name => ({ item, name })))
-        .filter(candidate => {
-            const candidateComparable = normalizeComparableName(candidate.name);
-            if (!candidateComparable || candidateComparable.length < 3) return false;
-            return comparableNamesMatch(parsedComparable, candidateComparable)
-                || rawComparable.includes(candidateComparable)
-                || candidateComparable.includes(parsedComparable);
-        })
-        .sort((a, b) => normalizeComparableName(b.name).length - normalizeComparableName(a.name).length);
-
-    if (!candidates.length) return parsedIngredient;
-    return { ...parsedIngredient, food_name: candidates[0].item.name, matched_item_id: candidates[0].item.id };
+    // Keine automatische Umbenennung/Zuordnung anhand ähnlicher Namen.
+    // Der sichere Weg ist: expliziter Link aus recipe_ingredients oder exakter Treffer.
+    return parsedIngredient;
 }
 
 function convertAmountForDisplay(amount, originalUnit, inventoryUnit) {
@@ -898,13 +898,24 @@ function compareRecipeIngredientWithStock(item, ingredient, required) {
 
 function findInventoryItemForIngredient(parsedIngredient, inventoryItems) {
     if (!parsedIngredient) return null;
+
+    if (parsedIngredient.food_item_id) {
+        const byFoodItemId = inventoryItems.find(item => Number(item.food_item_id) === Number(parsedIngredient.food_item_id));
+        if (byFoodItemId) return byFoodItemId;
+    }
+
     if (parsedIngredient.matched_item_id) {
         const byId = inventoryItems.find(item => Number(item.id) === Number(parsedIngredient.matched_item_id));
         if (byId) return byId;
     }
 
-    return inventoryItems.find(item => comparableNamesMatch(parsedIngredient.food_name, item.name)
-        || comparableNamesMatch(parsedIngredient.food_name, item.recipe_match_name || "")) || null;
+    const ingredientKey = buildFoodIdentity(parsedIngredient.food_name).canonical_key;
+    if (!ingredientKey) return null;
+
+    return inventoryItems.find(item => {
+        const itemKey = item.canonical_name || buildFoodIdentity(item.name).canonical_key;
+        return itemKey && itemKey === ingredientKey;
+    }) || null;
 }
 
 function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
@@ -943,9 +954,13 @@ async function getAllInventoryItemsWithBatches() {
 }
 
 function ingredientMatchesName(ingredientName, searchName) {
-    return comparableNamesMatch(ingredientName, searchName)
-        || normalizeComparableName(ingredientName).includes(normalizeComparableName(searchName))
-        || normalizeComparableName(searchName).includes(normalizeComparableName(ingredientName));
+    const left = buildFoodIdentity(ingredientName).canonical_key;
+    const right = buildFoodIdentity(searchName).canonical_key;
+    if (left && right && left === right) return true;
+
+    const leftDisplay = normalizeGermanText(ingredientName).replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+    const rightDisplay = normalizeGermanText(searchName).replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+    return Boolean(leftDisplay && rightDisplay && leftDisplay === rightDisplay);
 }
 
 function normalizeRecipeRow(recipe) {
@@ -992,7 +1007,7 @@ async function addFoodAlias(foodItemId, aliasName) {
 async function getOrCreateFoodItem(name, { calories_per_100g = null, aliasName = "" } = {}) {
     const identity = buildFoodIdentity(name);
     const canonicalKey = identity.canonical_key || canonicalizeIngredientName(name);
-    const displayName = identity.display_name || normalizeName(name);
+    const displayName = normalizeVisibleFoodName(name);
     if (!canonicalKey || !displayName) throw new Error("Lebensmittel konnte nicht normalisiert werden.");
 
     let foodItem = await get(`SELECT * FROM food_items WHERE canonical_key = ? LIMIT 1`, [canonicalKey]);
@@ -1847,27 +1862,28 @@ app.get("/recipes/by-ingredient/:name", async (req, res) => {
 
 function scoreInventoryIngredientMatch(item, ingredientName) {
     const ingredientKey = buildFoodIdentity(ingredientName).canonical_key;
-    if (ingredientKey && item.canonical_name && ingredientKey === item.canonical_name) return 100;
-    const candidateNames = [item.name, item.recipe_match_name, item.canonical_name].filter(Boolean);
-    let bestScore = 0;
+    const itemKey = item?.canonical_name || buildFoodIdentity(item?.name).canonical_key;
 
+    // Nur exakte interne Identität oder exakter sichtbarer Name darf automatisch treffen.
+    // Keine Teilstring-/Token-Matches mehr: "Salz" darf NICHT "gesalzen" treffen,
+    // "Eier" darf NICHT "Eierstich" treffen.
+    if (ingredientKey && itemKey && ingredientKey === itemKey) return 100;
+
+    const ingredientComparable = normalizeGermanText(ingredientName)
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const candidateNames = [item?.name, item?.recipe_match_name].filter(Boolean);
     for (const candidate of candidateNames) {
-        const candidateComparable = normalizeComparableName(candidate);
-        const ingredientComparable = normalizeComparableName(ingredientName);
-        if (!candidateComparable || !ingredientComparable) continue;
-
-        if (candidateComparable === ingredientComparable) bestScore = Math.max(bestScore, 100);
-        if (comparableNamesMatch(candidate, ingredientName)) bestScore = Math.max(bestScore, 90);
-
-        const candidateTokens = candidateComparable.split(" ").filter(token => token.length >= 3);
-        const ingredientTokens = ingredientComparable.split(" ").filter(token => token.length >= 3);
-        const sharedTokens = ingredientTokens.filter(token => candidateTokens.includes(token));
-
-        if (sharedTokens.length && sharedTokens.length === ingredientTokens.length) bestScore = Math.max(bestScore, 75);
-        if (sharedTokens.length && sharedTokens.length === candidateTokens.length) bestScore = Math.max(bestScore, 70);
+        const candidateComparable = normalizeGermanText(candidate)
+            .replace(/[^a-z0-9\s-]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        if (candidateComparable && ingredientComparable && candidateComparable === ingredientComparable) return 100;
     }
 
-    return bestScore;
+    return 0;
 }
 
 app.get("/inventory/by-ingredient/:name", async (req, res) => {
@@ -1901,7 +1917,25 @@ app.get("/recipes/:id/stock-check", async (req, res) => {
 
         const inventoryItems = await getAllInventoryItemsWithBatches();
 
-        const parsedIngredients = parseIngredientsText(recipe.ingredients || "");
+        const linkedIngredients = await all(
+            `SELECT raw_text, food_name, amount, unit, sort_order, food_item_id
+             FROM recipe_ingredients
+             WHERE recipe_id = ?
+             ORDER BY sort_order ASC`,
+            [req.params.id]
+        );
+
+        const parsedIngredients = linkedIngredients.length
+            ? linkedIngredients.map(row => ({
+                raw_text: row.raw_text || "",
+                food_name: row.food_name || "",
+                amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+                unit: row.unit || "",
+                original_unit: row.unit || "",
+                food_item_id: row.food_item_id || null
+            }))
+            : parseIngredientsText(recipe.ingredients || "");
+
         const entries = parsedIngredients.map(ingredient => buildRecipeStockEntry(ingredient, inventoryItems, factor));
 
         const summary = entries.reduce((result, entry) => {
@@ -1963,14 +1997,22 @@ app.get("/food-items/resolve", async (req, res) => {
             ORDER BY fi.display_name COLLATE NOCASE ASC
         `);
         const ranked = suggestions
-            .map(item => ({
-                ...item,
-                score: item.canonical_key === identity.canonical_key
-                    ? 100
-                    : (comparableNamesMatch(item.display_name, lookupText) ? 75 : 0)
-            }))
-            .filter(item => item.score >= 75)
-            .sort((a, b) => b.score - a.score || a.display_name.localeCompare(b.display_name, "de"))
+            .map(item => {
+                const displayComparable = normalizeGermanText(item.display_name)
+                    .replace(/[^a-z0-9\s-]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                const lookupComparable = normalizeGermanText(lookupText)
+                    .replace(/[^a-z0-9\s-]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                return {
+                    ...item,
+                    score: item.canonical_key === identity.canonical_key || displayComparable === lookupComparable ? 100 : 0
+                };
+            })
+            .filter(item => item.score >= 100)
+            .sort((a, b) => a.display_name.localeCompare(b.display_name, "de"))
             .slice(0, 5);
         res.json({ query: originalQuery, lookup: lookupText, identity, exact: normalizeFoodItemRow(exactFoodItem), suggestions: ranked });
     } catch (error) {
