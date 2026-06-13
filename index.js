@@ -585,21 +585,55 @@ async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
     return foodItem || null;
 }
 
-async function getPreservedFoodItemForIngredient(previousLinks, index, rawText) {
-    const links = Array.isArray(previousLinks) ? previousLinks : [];
-    const raw = String(rawText || "").trim();
+function normalizeIngredientRawLineForMatch(value) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/\r/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
 
-    // 1) stärkster Fall: gleiche Zeile und identischer Text
+function ingredientFoodNamesMatch(a, b) {
+    const left = canonicalizeIngredientName(a);
+    const right = canonicalizeIngredientName(b);
+    if (!left || !right) return false;
+    return left === right;
+}
+
+async function getPreservedFoodItemForIngredient(previousLinks, index, ingredient) {
+    const links = Array.isArray(previousLinks) ? previousLinks : [];
+    const raw = normalizeIngredientRawLineForMatch(ingredient?.raw_text);
+    const foodName = ingredient?.food_name || "";
+
+    // 1) stärkster Fall: gleiche Zeile und identischer Text, whitespace-tolerant
     let link = links.find(entry =>
         Number(entry.sort_order) === Number(index) &&
-        String(entry.raw_text || "").trim() === raw &&
+        normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
         entry.food_item_id
     );
 
-    // 2) fallback: identischer Text an anderer Stelle, falls Zeilen verschoben wurden
+    // 2) Fallback: identischer Text an anderer Stelle, falls Zeilen verschoben wurden
     if (!link && raw) {
         link = links.find(entry =>
-            String(entry.raw_text || "").trim() === raw &&
+            normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
+            entry.food_item_id
+        );
+    }
+
+    // 3) Wichtiger Fall beim Bearbeiten: Menge geändert, Lebensmittel aber gleich.
+    // Beispiel: "100 g Reis" -> "150 g Reis" darf keinen neuen Artikel erzeugen.
+    if (!link && foodName) {
+        link = links.find(entry =>
+            Number(entry.sort_order) === Number(index) &&
+            ingredientFoodNamesMatch(entry.food_name, foodName) &&
+            entry.food_item_id
+        );
+    }
+
+    // 4) Letzter sicherer Fallback: gleicher normalisierter Lebensmittelname in anderer Zeile.
+    if (!link && foodName) {
+        link = links.find(entry =>
+            ingredientFoodNamesMatch(entry.food_name, foodName) &&
             entry.food_item_id
         );
     }
@@ -656,7 +690,7 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
             await addFoodAlias(foodItem.id, ingredient.raw_text);
             await addFoodAlias(foodItem.id, ingredient.food_name);
         } else {
-            const preserved = await getPreservedFoodItemForIngredient(previousLinks, index, ingredient.raw_text);
+            const preserved = await getPreservedFoodItemForIngredient(previousLinks, index, ingredient);
             if (preserved) {
                 foodItem = preserved.foodItem;
                 linkSource = preserved.linkSource === "new_from_recipe" ? "preserved_recipe" : preserved.linkSource;
@@ -1316,6 +1350,19 @@ async function normalizeRecipeRowWithIngredientLinks(recipe) {
     };
 }
 
+function normalizeIngredientsTextForChangeCheck(value) {
+    return String(value || "")
+        .replace(/\r/g, "")
+        .split("\n")
+        .map(line => line.replace(/\s+/g, " ").trim())
+        .join("\n")
+        .trim();
+}
+
+function hasExplicitIngredientLinksPayload(payload) {
+    return Object.prototype.hasOwnProperty.call(payload || {}, "ingredientLinks") && Array.isArray(payload.ingredientLinks);
+}
+
 app.get("/recipes", async (req, res) => {
     try {
         const rows = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
@@ -1399,7 +1446,16 @@ app.put("/recipes/:id", async (req, res) => {
         );
 
         const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        await syncRecipeIngredients(updated.id, updated.ingredients || "", recipe.ingredientLinks);
+        const ingredientsChanged = normalizeIngredientsTextForChangeCheck(current.ingredients) !== normalizeIngredientsTextForChangeCheck(updated.ingredients);
+        const explicitLinksProvided = hasExplicitIngredientLinksPayload(req.body);
+
+        // Wichtig: Wenn nur Name, Kalorien, Portionen, Mahlzeiten oder Anleitung geändert werden,
+        // dürfen die bestehenden Zutaten-Verknüpfungen nicht neu synchronisiert werden.
+        // Genau das hat vorher beim erneuten Speichern bestehender Rezepte neue Inventarartikel erzeugen können.
+        if (ingredientsChanged || explicitLinksProvided) {
+            await syncRecipeIngredients(updated.id, updated.ingredients || "", recipe.ingredientLinks);
+        }
+
         res.json(await normalizeRecipeRowWithIngredientLinks(updated));
     } catch (error) {
         console.error("Fehler bei PUT /recipes/:id:", error.message);
