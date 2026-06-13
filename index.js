@@ -262,14 +262,18 @@ function normalizeIngredientUnit(unit) {
         g: "g", gr: "g", gramm: "g",
         kg: "kg", kilogramm: "kg",
         ml: "ml", milliliter: "ml",
+        cl: "cl", zentiliter: "cl",
+        dl: "dl", deziliter: "dl",
         l: "l", liter: "l",
+        cup: "cup", cups: "cup", tasse: "cup", tassen: "cup",
         stk: "Stk.", stück: "Stk.", stueck: "Stk.", ei: "Stk.", eier: "Stk.",
         dose: "Dose", dosen: "Dose",
         glas: "Glas", glaeser: "Glas", gläser: "Glas",
         packung: "Packung", packungen: "Packung", pkg: "Packung",
-        el: "EL", esslöffel: "EL", essloeffel: "EL",
-        tl: "TL", teelöffel: "TL", teeloeffel: "TL",
-        prise: "Prise", prisen: "Prise"
+        el: "EL", esslöffel: "EL", essloeffel: "EL", tablespoon: "EL", tablespoons: "EL", tbsp: "EL",
+        tl: "TL", teelöffel: "TL", teeloeffel: "TL", teaspoon: "TL", teaspoons: "TL", tsp: "TL",
+        prise: "Prise", prisen: "Prise",
+        spritzer: "Spritzer", schuss: "Spritzer", schuesse: "Spritzer", schüsse: "Spritzer"
     };
     return aliases[clean] || unit || "";
 }
@@ -277,7 +281,7 @@ function normalizeIngredientUnit(unit) {
 function unitForInventory(unit) {
     const normalized = normalizeIngredientUnit(unit);
     if (normalized === "kg" || normalized === "g") return "g";
-    if (normalized === "l" || normalized === "ml") return "ml";
+    if (["l", "dl", "cl", "ml", "cup", "EL", "TL"].includes(normalized)) return "ml";
     return "Stk.";
 }
 
@@ -285,6 +289,11 @@ function convertIngredientAmount(amount, unit) {
     if (amount === null || amount === undefined) return null;
     const normalized = normalizeIngredientUnit(unit);
     if (normalized === "kg" || normalized === "l") return amount * 1000;
+    if (normalized === "dl") return amount * 100;
+    if (normalized === "cl") return amount * 10;
+    if (normalized === "cup") return amount * 240;
+    if (normalized === "EL") return amount * 15;
+    if (normalized === "TL") return amount * 5;
     return amount;
 }
 
@@ -322,7 +331,7 @@ const FOOD_VARIANT_DISPLAY = {
     tk: "TK"
 };
 
-const UNIT_TOKEN_SET = new Set(["kg", "g", "gr", "gramm", "ml", "l", "liter", "stk", "stueck", "stuck", "dose", "dosen", "glas", "glaeser", "glaeser", "packung", "packungen", "pkg", "el", "tl", "prise", "prisen"]);
+const UNIT_TOKEN_SET = new Set(["kg", "g", "gr", "gramm", "ml", "cl", "dl", "l", "liter", "milliliter", "zentiliter", "deziliter", "stk", "stueck", "stuck", "dose", "dosen", "glas", "glaeser", "gläser", "packung", "packungen", "pkg", "cup", "cups", "tasse", "tassen", "el", "essloeffel", "esslöffel", "tl", "teeloeffel", "teelöffel", "tbsp", "tsp", "prise", "prisen", "spritzer", "schuss", "schuesse", "schüsse"]);
 const FILLER_TOKEN_SET = new Set(["a", "à", "je", "pro", "ca", "circa", "etwa", "und", "oder", "mit", "in", "aus", "von", "fuer", "fur"]);
 
 function normalizeGermanText(value) {
@@ -1728,6 +1737,242 @@ async function deleteInventoryItemCompletely(itemId) {
     return { id, name: item.name };
 }
 
+
+function getEffectiveInventoryCanonical(item) {
+    const visibleKey = buildFoodIdentity(item?.name || "").canonical_key || "";
+    return visibleKey || item?.canonical_name || "";
+}
+
+function isRecipeGeneratedWithoutStock(item) {
+    return String(item?.source || "manual") === "recipe" && getInventoryStockTotal(item) <= 0;
+}
+
+function chooseInventoryItemForParsedTarget(parsedIngredient, inventoryItems, alreadyUsedIds = new Set()) {
+    const targetKey = buildFoodIdentity(parsedIngredient?.food_name || parsedIngredient?.raw_text).canonical_key || "";
+    if (!targetKey) return null;
+    const targetName = normalizeVisibleFoodName(parsedIngredient?.food_name || "");
+    const targetComparable = normalizeGermanText(targetName).replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+
+    const candidates = inventoryItems
+        .filter(item => !alreadyUsedIds.has(Number(item.id)))
+        .filter(item => {
+            const storedKey = item?.canonical_name || "";
+            const effectiveKey = getEffectiveInventoryCanonical(item);
+            return storedKey === targetKey || effectiveKey === targetKey;
+        })
+        .map(item => {
+            const itemComparable = normalizeGermanText(item.name || "").replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
+            let score = 0;
+            if (itemComparable === targetComparable) score += 1000;
+            if (getInventoryStockTotal(item) > 0) score += 500;
+            if (String(item.source || "manual") !== "recipe") score += 250;
+            if ((item.canonical_name || "") === targetKey) score += 50;
+            score -= Math.abs(String(item.name || "").length - targetName.length);
+            score -= Number(item.id) / 100000;
+            return { item, score };
+        })
+        .sort((a, b) => b.score - a.score);
+
+    return candidates[0]?.item || null;
+}
+
+async function buildRecipeIngredientRebuildPlan() {
+    const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
+    const inventoryItems = await getAllInventoryItemsWithBatches();
+    const targetMap = new Map();
+    const parsedRows = [];
+
+    for (const recipe of recipes) {
+        const parsed = parseIngredientsText(recipe.ingredients || "");
+        parsed.forEach((ingredient, index) => {
+            const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
+            if (!canonicalKey) return;
+            if (!targetMap.has(canonicalKey)) {
+                targetMap.set(canonicalKey, {
+                    canonical_key: canonicalKey,
+                    display_name: normalizeVisibleFoodName(ingredient.food_name || ingredient.raw_text),
+                    unit: ingredient.unit || "g",
+                    occurrences: []
+                });
+            }
+            targetMap.get(canonicalKey).occurrences.push({
+                recipe_id: recipe.id,
+                recipe_name: recipe.name,
+                sort_order: index,
+                raw_text: ingredient.raw_text,
+                food_name: ingredient.food_name,
+                amount: ingredient.amount,
+                unit: ingredient.unit
+            });
+            parsedRows.push({ recipe, ingredient, index, canonical_key: canonicalKey });
+        });
+    }
+
+    const targetItems = [];
+    const usedInventoryIds = new Set();
+    for (const target of targetMap.values()) {
+        const representative = {
+            food_name: target.display_name,
+            raw_text: target.occurrences[0]?.raw_text || target.display_name
+        };
+        const existing = chooseInventoryItemForParsedTarget(representative, inventoryItems, usedInventoryIds);
+        if (existing) usedInventoryIds.add(Number(existing.id));
+        targetItems.push({
+            ...target,
+            action: existing ? "link_existing" : "create_new",
+            existing_item: existing ? {
+                id: existing.id,
+                name: existing.name,
+                source: existing.source || "manual",
+                stock_total: getInventoryStockTotal(existing),
+                canonical_name: existing.canonical_name || ""
+            } : null,
+            will_rename_existing: Boolean(existing && isRecipeGeneratedWithoutStock(existing) && normalizeGermanText(existing.name) !== normalizeGermanText(target.display_name))
+        });
+    }
+
+    const targetKeys = new Set(Array.from(targetMap.keys()));
+    const deleteCandidates = inventoryItems.filter(item => {
+        if (!isRecipeGeneratedWithoutStock(item)) return false;
+        if (usedInventoryIds.has(Number(item.id))) return false;
+        const storedKey = item.canonical_name || "";
+        const effectiveKey = getEffectiveInventoryCanonical(item);
+        // Wenn ein bestandsloser Auto-Artikel nur wegen alter Einheiten-Schreibweise effektiv zu einem Ziel gehört,
+        // aber nicht als Zielartikel ausgewählt wurde, darf er gelöscht werden.
+        if (targetKeys.has(storedKey) || targetKeys.has(effectiveKey)) return true;
+        return true;
+    });
+
+    const protectedItems = inventoryItems.filter(item => !deleteCandidates.some(candidate => Number(candidate.id) === Number(item.id)));
+
+    return {
+        generated_at: new Date().toISOString(),
+        counts: {
+            recipes: recipes.length,
+            parsed_ingredients: parsedRows.length,
+            target_items: targetItems.length,
+            link_existing: targetItems.filter(item => item.action === "link_existing").length,
+            create_new: targetItems.filter(item => item.action === "create_new").length,
+            rename_existing: targetItems.filter(item => item.will_rename_existing).length,
+            delete_candidates: deleteCandidates.length,
+            protected_items: protectedItems.length
+        },
+        target_items: targetItems.sort((a, b) => a.display_name.localeCompare(b.display_name, "de")),
+        delete_candidates: deleteCandidates.map(item => ({
+            id: item.id,
+            name: item.name,
+            canonical_name: item.canonical_name || "",
+            effective_canonical_name: getEffectiveInventoryCanonical(item),
+            source: item.source || "manual",
+            stock_total: getInventoryStockTotal(item)
+        })).sort((a, b) => String(a.name).localeCompare(String(b.name), "de")),
+        protected_items: protectedItems.map(item => ({
+            id: item.id,
+            name: item.name,
+            source: item.source || "manual",
+            stock_total: getInventoryStockTotal(item),
+            reason: getInventoryStockTotal(item) > 0 ? "Bestand vorhanden" : String(item.source || "manual") !== "recipe" ? "manuell gepflegt" : "wird als Zielartikel genutzt oder ist nicht sicher löschbar"
+        })).sort((a, b) => String(a.name).localeCompare(String(b.name), "de"))
+    };
+}
+
+async function applyRecipeIngredientRebuild() {
+    const recipes = await all(`SELECT * FROM recipes ORDER BY id ASC`);
+    let createdItems = 0;
+    let renamedItems = 0;
+    let linkedIngredients = 0;
+    let deletedItems = [];
+
+    await run("BEGIN");
+    try {
+        const inventoryItems = await getAllInventoryItemsWithBatches();
+        const targetInventoryByCanonical = new Map();
+        const usedInventoryIds = new Set();
+
+        for (const recipe of recipes) {
+            const parsed = parseIngredientsText(recipe.ingredients || "");
+            for (const ingredient of parsed) {
+                const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
+                if (!canonicalKey || targetInventoryByCanonical.has(canonicalKey)) continue;
+
+                let item = chooseInventoryItemForParsedTarget(ingredient, inventoryItems, usedInventoryIds);
+                if (item) {
+                    usedInventoryIds.add(Number(item.id));
+                    const previousFoodItemId = item.food_item_id ? Number(item.food_item_id) : null;
+                    const foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    await addFoodAlias(foodItem.id, item.name);
+                    await addFoodAlias(foodItem.id, ingredient.raw_text);
+
+                    const shouldRename = isRecipeGeneratedWithoutStock(item) && normalizeGermanText(item.name) !== normalizeGermanText(ingredient.food_name);
+                    await run(
+                        `UPDATE inventory_items
+                         SET name = ?,
+                             recipe_match_name = ?,
+                             canonical_name = ?,
+                             food_item_id = ?,
+                             unit = COALESCE(NULLIF(unit, ''), ?),
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [shouldRename ? ingredient.food_name : item.name, ingredient.food_name, foodItem.canonical_key, foodItem.id, ingredient.unit || "g", item.id]
+                    );
+                    if (shouldRename) renamedItems += 1;
+                    if (previousFoodItemId && previousFoodItemId !== Number(foodItem.id)) await removeFoodItemIfUnused(previousFoodItemId);
+                    item = { ...item, name: shouldRename ? ingredient.food_name : item.name, canonical_name: foodItem.canonical_key, food_item_id: foodItem.id };
+                } else {
+                    const foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    const result = await run(
+                        `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
+                         VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?, ?, ?, ?)`,
+                        [ingredient.food_name, ingredient.unit || "g", ingredient.food_name, foodItem.calories_per_100g ?? null, foodItem.id, foodItem.canonical_key]
+                    );
+                    item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
+                    inventoryItems.push(normalizeInventoryRow(item, []));
+                    usedInventoryIds.add(Number(item.id));
+                    createdItems += 1;
+                }
+                targetInventoryByCanonical.set(canonicalKey, item);
+            }
+        }
+
+        await run(`DELETE FROM recipe_ingredients`);
+
+        for (const recipe of recipes) {
+            const parsed = parseIngredientsText(recipe.ingredients || "");
+            for (const [index, ingredient] of parsed.entries()) {
+                const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
+                const item = canonicalKey ? targetInventoryByCanonical.get(canonicalKey) : null;
+                let foodItem = item?.food_item_id ? await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]) : null;
+                if (!foodItem) foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+                await addFoodAlias(foodItem.id, ingredient.raw_text);
+                await addFoodAlias(foodItem.id, ingredient.food_name);
+                await run(
+                    `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key, link_source)
+                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 'rebuilt')`,
+                    [recipe.id, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key]
+                );
+                linkedIngredients += 1;
+            }
+        }
+
+        const currentInventoryItems = await getAllInventoryItemsWithBatches();
+        const usedItemIds = new Set(Array.from(targetInventoryByCanonical.values()).map(item => Number(item.id)));
+        const deleteCandidates = currentInventoryItems.filter(item => isRecipeGeneratedWithoutStock(item) && !usedItemIds.has(Number(item.id)));
+        for (const item of deleteCandidates) {
+            await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [item.id]);
+            await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a = ? OR item_id_b = ?`, [item.id, item.id]);
+            await run(`DELETE FROM inventory_items WHERE id = ?`, [item.id]);
+            deletedItems.push({ id: item.id, name: item.name });
+            if (item.food_item_id) await removeFoodItemIfUnused(item.food_item_id);
+        }
+
+        await run("COMMIT");
+        return { created_items: createdItems, renamed_items: renamedItems, linked_ingredients: linkedIngredients, deleted_items: deletedItems };
+    } catch (error) {
+        await run("ROLLBACK");
+        throw error;
+    }
+}
+
 async function buildInventoryCleanupPreview() {
     const inventoryItems = await getAllInventoryItemsWithBatches();
     const recipeIngredientRows = await all(`
@@ -2396,6 +2641,29 @@ app.post("/admin/duplicate-keep-both", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei POST /admin/duplicate-keep-both:", error.message);
         res.status(500).json({ error: "Dubletten-Entscheidung konnte nicht gespeichert werden." });
+    }
+});
+
+
+app.get("/admin/recipe-resync-preview", async (req, res) => {
+    try {
+        const preview = await buildRecipeIngredientRebuildPlan();
+        res.json(preview);
+    } catch (error) {
+        console.error("Fehler bei GET /admin/recipe-resync-preview:", error.message);
+        res.status(500).json({ error: "Rezept-Zutaten-Synchronisierung konnte nicht analysiert werden." });
+    }
+});
+
+app.post("/admin/recipe-resync-apply", async (req, res) => {
+    try {
+        const result = await applyRecipeIngredientRebuild();
+        const preview = await buildRecipeIngredientRebuildPlan();
+        const cleanupPreview = await buildInventoryCleanupPreview();
+        res.json({ success: true, result, preview, cleanup_preview: cleanupPreview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/recipe-resync-apply:", error.message);
+        res.status(500).json({ error: error.message || "Rezept-Zutaten konnten nicht neu aufgebaut werden." });
     }
 });
 
