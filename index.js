@@ -2402,34 +2402,55 @@ app.put("/inventory/:id", async (req, res) => {
         if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
 
         const identity = buildFoodIdentity(validation.value.name);
-        const canonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
-        if (!canonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
+        const proposedCanonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
+        if (!proposedCanonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
 
         let foodItem = null;
+        let canonicalKeyForInventory = proposedCanonicalKey;
 
         if (existing.food_item_id) {
-            const conflictingFoodItem = await get(
-                `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
-                [canonicalKey, existing.food_item_id]
-            );
-
-            if (conflictingFoodItem) {
-                // Falls die neue Bezeichnung bereits zu einem anderen Stammdatensatz gehört,
-                // verknüpfen wir den Inventarartikel damit, ohne die vom User eingegebene Anzeige zu überschreiben.
-                foodItem = conflictingFoodItem;
+            // Wichtig: Eine reine Umbenennung im Inventar darf die bestehende Stammdaten-Zuordnung
+            // niemals auf einen anderen food_item-Datensatz umhängen. Sonst verliert der Artikel
+            // Rezept-/Alias-/Inventarbezüge. Deshalb bleibt existing.food_item_id führend.
+            foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
+            if (!foodItem) {
+                foodItem = await getOrCreateFoodItem(validation.value.name, {
+                    calories_per_100g: validation.value.calories_per_100g
+                });
             } else {
-                await run(
-                    `UPDATE food_items
-                     SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
-                     WHERE id = ?`,
-                    [validation.value.name, canonicalKey, validation.value.calories_per_100g, existing.food_item_id]
+                const conflictingFoodItem = await get(
+                    `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
+                    [proposedCanonicalKey, existing.food_item_id]
                 );
+
+                if (conflictingFoodItem) {
+                    // Der sichtbare Name darf trotzdem geändert werden. Den internen Schlüssel
+                    // behalten wir in diesem Fall stabil, damit keine UNIQUE-Kollision und kein
+                    // unbeabsichtigter Stammdatenwechsel entsteht. Die neue Schreibweise wird Alias.
+                    await run(
+                        `UPDATE food_items
+                         SET display_name = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [validation.value.name, validation.value.calories_per_100g, existing.food_item_id]
+                    );
+                    canonicalKeyForInventory = foodItem.canonical_key || existing.canonical_name || proposedCanonicalKey;
+                } else {
+                    await run(
+                        `UPDATE food_items
+                         SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [validation.value.name, proposedCanonicalKey, validation.value.calories_per_100g, existing.food_item_id]
+                    );
+                    canonicalKeyForInventory = proposedCanonicalKey;
+                }
+
                 foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
             }
         } else {
             foodItem = await getOrCreateFoodItem(validation.value.name, {
                 calories_per_100g: validation.value.calories_per_100g
             });
+            canonicalKeyForInventory = foodItem.canonical_key || proposedCanonicalKey;
         }
 
         await addFoodAlias(foodItem.id, existing.name);
@@ -2445,7 +2466,7 @@ app.put("/inventory/:id", async (req, res) => {
                 validation.value.notes,
                 validation.value.calories_per_100g,
                 foodItem.id,
-                foodItem.canonical_key || canonicalKey,
+                foodItem.canonical_key || canonicalKeyForInventory,
                 req.params.id
             ]
         );
