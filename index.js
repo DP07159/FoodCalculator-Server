@@ -148,6 +148,23 @@ async function ensureSchema() {
         )
     `);
 
+
+    await run(`
+        CREATE TABLE IF NOT EXISTS admin_recipe_resync_overrides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            override_type TEXT NOT NULL,
+            canonical_key TEXT DEFAULT '',
+            inventory_item_id INTEGER,
+            target_inventory_item_id INTEGER,
+            food_item_id INTEGER,
+            action TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(override_type, canonical_key, inventory_item_id)
+        )
+    `);
+
     await addColumnIfMissing("health_factors", "category", "TEXT DEFAULT ''");
     await addColumnIfMissing("health_factors", "description", "TEXT DEFAULT ''");
     await addColumnIfMissing("health_factors", "updated_at", "TEXT DEFAULT ''");
@@ -1809,6 +1826,43 @@ function isRecipeGeneratedWithoutStock(item) {
     return String(item?.source || "manual") === "recipe" && getInventoryStockTotal(item) <= 0;
 }
 
+
+async function getRecipeResyncOverrides() {
+    const rows = await all(`SELECT * FROM admin_recipe_resync_overrides`);
+    return rows || [];
+}
+
+function buildRecipeResyncOverrideMaps(overrides = []) {
+    const linkByCanonical = new Map();
+    const ignoreCreateByCanonical = new Set();
+    const deleteByInventoryId = new Map();
+    const ignoreDeleteByInventoryId = new Set();
+    for (const row of overrides || []) {
+        const type = String(row.override_type || "");
+        const action = String(row.action || "");
+        const canonical = String(row.canonical_key || "");
+        const inventoryId = Number(row.inventory_item_id || 0);
+        const targetId = Number(row.target_inventory_item_id || 0);
+        if (type === "create" && canonical && action === "link_existing" && targetId) linkByCanonical.set(canonical, targetId);
+        if (type === "create" && canonical && action === "ignore") ignoreCreateByCanonical.add(canonical);
+        if (type === "delete" && inventoryId && action === "link_existing" && targetId) deleteByInventoryId.set(inventoryId, targetId);
+        if (type === "delete" && inventoryId && action === "ignore") ignoreDeleteByInventoryId.add(inventoryId);
+    }
+    return { linkByCanonical, ignoreCreateByCanonical, deleteByInventoryId, ignoreDeleteByInventoryId };
+}
+
+function toRecipeResyncInventoryOption(item) {
+    if (!item) return null;
+    return {
+        id: item.id,
+        name: item.name,
+        source: item.source || "manual",
+        stock_total: getInventoryStockTotal(item),
+        canonical_name: item.canonical_name || "",
+        food_item_id: item.food_item_id || null
+    };
+}
+
 function chooseInventoryItemForParsedTarget(parsedIngredient, inventoryItems, alreadyUsedIds = new Set()) {
     const targetKey = buildFoodIdentity(parsedIngredient?.food_name || parsedIngredient?.raw_text).canonical_key || "";
     if (!targetKey) return null;
@@ -1841,6 +1895,12 @@ function chooseInventoryItemForParsedTarget(parsedIngredient, inventoryItems, al
 async function buildRecipeIngredientRebuildPlan() {
     const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
     const inventoryItems = await getAllInventoryItemsWithBatches();
+    const overrides = await getRecipeResyncOverrides();
+    const overrideMaps = buildRecipeResyncOverrideMaps(overrides);
+    const inventoryOptions = inventoryItems
+        .map(toRecipeResyncInventoryOption)
+        .filter(Boolean)
+        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "de"));
     const targetMap = new Map();
     const parsedRows = [];
 
@@ -1877,18 +1937,30 @@ async function buildRecipeIngredientRebuildPlan() {
             food_name: target.display_name,
             raw_text: target.occurrences[0]?.raw_text || target.display_name
         };
-        const existing = chooseInventoryItemForParsedTarget(representative, inventoryItems, usedInventoryIds);
+        let existing = null;
+        let override = null;
+        if (overrideMaps.ignoreCreateByCanonical.has(target.canonical_key)) {
+            targetItems.push({
+                ...target,
+                action: "ignore",
+                existing_item: null,
+                override: { action: "ignore" },
+                will_rename_existing: false
+            });
+            continue;
+        }
+        const overrideTargetId = overrideMaps.linkByCanonical.get(target.canonical_key);
+        if (overrideTargetId) {
+            existing = inventoryItems.find(item => Number(item.id) === Number(overrideTargetId)) || null;
+            if (existing) override = { action: "link_existing", target_inventory_item_id: existing.id };
+        }
+        if (!existing) existing = chooseInventoryItemForParsedTarget(representative, inventoryItems, usedInventoryIds);
         if (existing) usedInventoryIds.add(Number(existing.id));
         targetItems.push({
             ...target,
-            action: existing ? "link_existing" : "create_new",
-            existing_item: existing ? {
-                id: existing.id,
-                name: existing.name,
-                source: existing.source || "manual",
-                stock_total: getInventoryStockTotal(existing),
-                canonical_name: existing.canonical_name || ""
-            } : null,
+            action: override?.action || (existing ? "link_existing" : "create_new"),
+            existing_item: toRecipeResyncInventoryOption(existing),
+            override,
             will_rename_existing: Boolean(existing && isRecipeGeneratedWithoutStock(existing) && normalizeGermanText(existing.name) !== normalizeGermanText(target.display_name))
         });
     }
@@ -1897,6 +1969,8 @@ async function buildRecipeIngredientRebuildPlan() {
     const deleteCandidates = inventoryItems.filter(item => {
         if (!isRecipeGeneratedWithoutStock(item)) return false;
         if (usedInventoryIds.has(Number(item.id))) return false;
+        if (overrideMaps.ignoreDeleteByInventoryId.has(Number(item.id))) return false;
+        if (overrideMaps.deleteByInventoryId.has(Number(item.id))) return true;
         const storedKey = item.canonical_name || "";
         const effectiveKey = getEffectiveInventoryCanonical(item);
         // Wenn ein bestandsloser Auto-Artikel nur wegen alter Einheiten-Schreibweise effektiv zu einem Ziel gehört,
@@ -1941,6 +2015,8 @@ async function buildRecipeIngredientRebuildPlan() {
             source: item.source || "manual",
             stock_total: getInventoryStockTotal(item)
         })).sort((a, b) => String(a.name).localeCompare(String(b.name), "de")),
+        inventory_options: inventoryOptions,
+        overrides: overrides,
         protected_items: protectedItems.map(item => ({
             id: item.id,
             name: item.name,
@@ -1962,6 +2038,8 @@ async function applyRecipeIngredientRebuild(options = {}) {
     await run("BEGIN");
     try {
         const inventoryItems = await getAllInventoryItemsWithBatches();
+        const overrides = await getRecipeResyncOverrides();
+        const overrideMaps = buildRecipeResyncOverrideMaps(overrides);
         const targetInventoryByCanonical = new Map();
         const usedInventoryIds = new Set();
 
@@ -1970,8 +2048,12 @@ async function applyRecipeIngredientRebuild(options = {}) {
             for (const ingredient of parsed) {
                 const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
                 if (!canonicalKey || targetInventoryByCanonical.has(canonicalKey)) continue;
+                if (overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
 
-                let item = chooseInventoryItemForParsedTarget(ingredient, inventoryItems, usedInventoryIds);
+                let item = null;
+                const overrideTargetId = overrideMaps.linkByCanonical.get(canonicalKey);
+                if (overrideTargetId) item = inventoryItems.find(candidate => Number(candidate.id) === Number(overrideTargetId)) || null;
+                if (!item) item = chooseInventoryItemForParsedTarget(ingredient, inventoryItems, usedInventoryIds);
                 if (item) {
                     usedInventoryIds.add(Number(item.id));
                     const previousFoodItemId = item.food_item_id ? Number(item.food_item_id) : null;
@@ -2016,6 +2098,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
             const parsed = parseIngredientsText(recipe.ingredients || "");
             for (const [index, ingredient] of parsed.entries()) {
                 const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
+                if (canonicalKey && overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
                 const item = canonicalKey ? targetInventoryByCanonical.get(canonicalKey) : null;
                 let foodItem = item?.food_item_id ? await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]) : null;
                 if (!foodItem) foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
@@ -2038,10 +2121,23 @@ async function applyRecipeIngredientRebuild(options = {}) {
             return isRecipeGeneratedWithoutStock(item);
         });
         for (const item of deleteCandidates) {
+            const targetOverrideId = overrideMaps.deleteByInventoryId.get(Number(item.id));
+            if (targetOverrideId) {
+                const targetItem = currentInventoryItems.find(candidate => Number(candidate.id) === Number(targetOverrideId));
+                if (targetItem) {
+                    if (targetItem.food_item_id && item.food_item_id && Number(targetItem.food_item_id) !== Number(item.food_item_id)) {
+                        await consolidateFoodItems(targetItem.food_item_id, [item.food_item_id]);
+                    }
+                    if (targetItem.food_item_id) {
+                        await addFoodAlias(targetItem.food_item_id, item.name);
+                        await addFoodAlias(targetItem.food_item_id, item.recipe_match_name || item.name);
+                    }
+                }
+            }
             await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [item.id]);
             await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a = ? OR item_id_b = ?`, [item.id, item.id]);
             await run(`DELETE FROM inventory_items WHERE id = ?`, [item.id]);
-            deletedItems.push({ id: item.id, name: item.name });
+            deletedItems.push({ id: item.id, name: item.name, linked_to_inventory_item_id: targetOverrideId || null });
             if (item.food_item_id) await removeFoodItemIfUnused(item.food_item_id);
         }
 
@@ -2402,55 +2498,34 @@ app.put("/inventory/:id", async (req, res) => {
         if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
 
         const identity = buildFoodIdentity(validation.value.name);
-        const proposedCanonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
-        if (!proposedCanonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
+        const canonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
+        if (!canonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
 
         let foodItem = null;
-        let canonicalKeyForInventory = proposedCanonicalKey;
 
         if (existing.food_item_id) {
-            // Wichtig: Eine reine Umbenennung im Inventar darf die bestehende Stammdaten-Zuordnung
-            // niemals auf einen anderen food_item-Datensatz umhängen. Sonst verliert der Artikel
-            // Rezept-/Alias-/Inventarbezüge. Deshalb bleibt existing.food_item_id führend.
-            foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
-            if (!foodItem) {
-                foodItem = await getOrCreateFoodItem(validation.value.name, {
-                    calories_per_100g: validation.value.calories_per_100g
-                });
+            const conflictingFoodItem = await get(
+                `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
+                [canonicalKey, existing.food_item_id]
+            );
+
+            if (conflictingFoodItem) {
+                // Falls die neue Bezeichnung bereits zu einem anderen Stammdatensatz gehört,
+                // verknüpfen wir den Inventarartikel damit, ohne die vom User eingegebene Anzeige zu überschreiben.
+                foodItem = conflictingFoodItem;
             } else {
-                const conflictingFoodItem = await get(
-                    `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
-                    [proposedCanonicalKey, existing.food_item_id]
+                await run(
+                    `UPDATE food_items
+                     SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?`,
+                    [validation.value.name, canonicalKey, validation.value.calories_per_100g, existing.food_item_id]
                 );
-
-                if (conflictingFoodItem) {
-                    // Der sichtbare Name darf trotzdem geändert werden. Den internen Schlüssel
-                    // behalten wir in diesem Fall stabil, damit keine UNIQUE-Kollision und kein
-                    // unbeabsichtigter Stammdatenwechsel entsteht. Die neue Schreibweise wird Alias.
-                    await run(
-                        `UPDATE food_items
-                         SET display_name = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
-                         WHERE id = ?`,
-                        [validation.value.name, validation.value.calories_per_100g, existing.food_item_id]
-                    );
-                    canonicalKeyForInventory = foodItem.canonical_key || existing.canonical_name || proposedCanonicalKey;
-                } else {
-                    await run(
-                        `UPDATE food_items
-                         SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
-                         WHERE id = ?`,
-                        [validation.value.name, proposedCanonicalKey, validation.value.calories_per_100g, existing.food_item_id]
-                    );
-                    canonicalKeyForInventory = proposedCanonicalKey;
-                }
-
                 foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
             }
         } else {
             foodItem = await getOrCreateFoodItem(validation.value.name, {
                 calories_per_100g: validation.value.calories_per_100g
             });
-            canonicalKeyForInventory = foodItem.canonical_key || proposedCanonicalKey;
         }
 
         await addFoodAlias(foodItem.id, existing.name);
@@ -2466,7 +2541,7 @@ app.put("/inventory/:id", async (req, res) => {
                 validation.value.notes,
                 validation.value.calories_per_100g,
                 foodItem.id,
-                foodItem.canonical_key || canonicalKeyForInventory,
+                foodItem.canonical_key || canonicalKey,
                 req.params.id
             ]
         );
@@ -3071,6 +3146,47 @@ app.post("/admin/duplicate-keep-both", async (req, res) => {
     }
 });
 
+
+app.post("/admin/recipe-resync-overrides", async (req, res) => {
+    try {
+        const overrideType = String(req.body?.override_type || "").trim();
+        const canonicalKey = String(req.body?.canonical_key || "").trim();
+        const inventoryItemId = req.body?.inventory_item_id === null || req.body?.inventory_item_id === undefined ? null : Number(req.body.inventory_item_id);
+        const targetInventoryItemId = req.body?.target_inventory_item_id === null || req.body?.target_inventory_item_id === undefined ? null : Number(req.body.target_inventory_item_id);
+        const action = String(req.body?.action || "").trim();
+        const note = String(req.body?.note || "").trim();
+
+        if (!["create", "delete"].includes(overrideType)) return res.status(400).json({ error: "Ungültiger Override-Typ." });
+        if (!["link_existing", "ignore", "clear"].includes(action)) return res.status(400).json({ error: "Ungültige Aktion." });
+        if (overrideType === "create" && !canonicalKey) return res.status(400).json({ error: "Canonical Key fehlt." });
+        if (overrideType === "delete" && !Number.isFinite(inventoryItemId)) return res.status(400).json({ error: "Inventarartikel fehlt." });
+        if (action === "link_existing" && !Number.isFinite(targetInventoryItemId)) return res.status(400).json({ error: "Zielartikel fehlt." });
+        if (overrideType === "delete" && action === "link_existing" && Number(inventoryItemId) === Number(targetInventoryItemId)) {
+            return res.status(400).json({ error: "Ein Löschkandidat kann nicht mit sich selbst verknüpft werden." });
+        }
+
+        const inventoryKey = Number.isFinite(inventoryItemId) ? inventoryItemId : 0;
+        if (action === "clear") {
+            await run(
+                `DELETE FROM admin_recipe_resync_overrides WHERE override_type = ? AND canonical_key = ? AND inventory_item_id = ?`,
+                [overrideType, canonicalKey, inventoryKey]
+            );
+        } else {
+            await run(
+                `INSERT INTO admin_recipe_resync_overrides (override_type, canonical_key, inventory_item_id, target_inventory_item_id, action, note, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(override_type, canonical_key, inventory_item_id)
+                 DO UPDATE SET target_inventory_item_id = excluded.target_inventory_item_id, action = excluded.action, note = excluded.note, updated_at = CURRENT_TIMESTAMP`,
+                [overrideType, canonicalKey, inventoryKey, Number.isFinite(targetInventoryItemId) ? targetInventoryItemId : null, action, note]
+            );
+        }
+
+        res.json({ success: true, preview: await buildRecipeIngredientRebuildPlan() });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/recipe-resync-overrides:", error.message);
+        res.status(500).json({ error: error.message || "Override konnte nicht gespeichert werden." });
+    }
+});
 
 app.get("/admin/recipe-resync-preview", async (req, res) => {
     try {
