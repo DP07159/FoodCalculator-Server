@@ -2615,6 +2615,86 @@ app.delete("/inventory/:id", async (req, res) => {
 });
 
 
+
+
+async function getTableCountSafe(tableName) {
+    try {
+        const row = await get(`SELECT COUNT(*) AS count FROM ${tableName}`);
+        return Number(row?.count || 0);
+    } catch (error) {
+        return 0;
+    }
+}
+
+async function getDatabaseTableNames() {
+    const rows = await all(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name COLLATE NOCASE ASC
+    `);
+    return rows.map(row => row.name);
+}
+
+async function buildAdminSystemStatus() {
+    const [recipes, recipeIngredients, inventoryItems, inventoryBatches, inventoryLooseStock, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
+        getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('inventory_loose_stock'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
+    ]);
+    const stockRows = await all(`
+        SELECT item_id, SUM(amount) AS amount FROM inventory_loose_stock GROUP BY item_id
+        UNION ALL
+        SELECT item_id, SUM(remaining_quantity) AS amount FROM inventory_batches GROUP BY item_id
+    `).catch(() => []);
+    const itemStock = new Map();
+    stockRows.forEach(row => {
+        const id = Number(row.item_id);
+        itemStock.set(id, (itemStock.get(id) || 0) + Number(row.amount || 0));
+    });
+    const itemsWithStock = Array.from(itemStock.values()).filter(value => value > 0).length;
+    const linkedRow = await get(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NOT NULL`).catch(() => ({ count: 0 }));
+    const linkedRecipeIngredients = Number(linkedRow?.count || 0);
+    const unlinkedRecipeIngredients = Math.max(0, recipeIngredients - linkedRecipeIngredients);
+    const tableNames = await getDatabaseTableNames();
+    const tableCounts = [];
+    for (const table of tableNames) {
+        tableCounts.push({ name: table, count: await getTableCountSafe(table) });
+    }
+    return {
+        generated_at: new Date().toISOString(),
+        database_path: dbPath,
+        counts: {
+            recipes,
+            recipe_ingredients: recipeIngredients,
+            linked_recipe_ingredients: linkedRecipeIngredients,
+            unlinked_recipe_ingredients: unlinkedRecipeIngredients,
+            inventory_items: inventoryItems,
+            inventory_items_with_stock: itemsWithStock,
+            inventory_batches: inventoryBatches,
+            inventory_loose_stock: inventoryLooseStock,
+            food_items: foodItems,
+            food_aliases: foodAliases,
+            meal_plans: mealPlans,
+            ignored_duplicate_pairs: ignoredDuplicatePairs
+        },
+        tables: tableCounts
+    };
+}
+
+async function buildFullJsonBackup() {
+    const tableNames = await getDatabaseTableNames();
+    const tables = {};
+    for (const table of tableNames) {
+        tables[table] = await all(`SELECT * FROM ${table}`);
+    }
+    return {
+        app: 'Food Calculator',
+        format: 'foodcalculator-json-backup-v1',
+        exported_at: new Date().toISOString(),
+        database_path: dbPath,
+        tables
+    };
+}
+
 app.get("/admin/inventory-cleanup-preview", async (req, res) => {
     try {
         const preview = await buildInventoryCleanupPreview();
@@ -2731,6 +2811,30 @@ app.post("/admin/recipe-resync-apply", async (req, res) => {
     }
 });
 
+
+
+
+app.get("/admin/system-status", async (req, res) => {
+    try {
+        res.json(await buildAdminSystemStatus());
+    } catch (error) {
+        console.error("Fehler bei GET /admin/system-status:", error.message);
+        res.status(500).json({ error: "Systemstatus konnte nicht geladen werden" });
+    }
+});
+
+app.get("/admin/backup/export", async (req, res) => {
+    try {
+        const backup = await buildFullJsonBackup();
+        const date = new Date().toISOString().slice(0, 10);
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="foodcalculator-backup-${date}.json"`);
+        res.json(backup);
+    } catch (error) {
+        console.error("Fehler bei GET /admin/backup/export:", error.message);
+        res.status(500).json({ error: "Backup konnte nicht erstellt werden" });
+    }
+});
 
 ensureSchema()
     .then(() => {
