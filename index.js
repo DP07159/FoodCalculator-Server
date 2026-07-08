@@ -2718,11 +2718,13 @@ async function getAdminTablePreview(tableName, limit = 200) {
             LEFT JOIN (
                 SELECT item_id, SUM(remaining_quantity) AS amount
                 FROM inventory_batches
+                WHERE COALESCE(batch_type, 'package') != 'loose'
                 GROUP BY item_id
             ) batch_stock ON batch_stock.item_id = ii.id
             LEFT JOIN (
-                SELECT item_id, SUM(amount) AS amount
-                FROM inventory_loose_stock
+                SELECT item_id, SUM(remaining_weight) AS amount
+                FROM inventory_batches
+                WHERE COALESCE(batch_type, '') = 'loose'
                 GROUP BY item_id
             ) loose_stock ON loose_stock.item_id = ii.id
             ORDER BY ii.name COLLATE NOCASE ASC
@@ -2789,11 +2791,13 @@ async function getFoodItemAdminDetail(foodItemId) {
         LEFT JOIN (
             SELECT item_id, SUM(remaining_quantity) AS amount
             FROM inventory_batches
+            WHERE COALESCE(batch_type, 'package') != 'loose'
             GROUP BY item_id
         ) batch_stock ON batch_stock.item_id = ii.id
         LEFT JOIN (
-            SELECT item_id, SUM(amount) AS amount
-            FROM inventory_loose_stock
+            SELECT item_id, SUM(remaining_weight) AS amount
+            FROM inventory_batches
+            WHERE COALESCE(batch_type, '') = 'loose'
             GROUP BY item_id
         ) loose_stock ON loose_stock.item_id = ii.id
         WHERE ii.food_item_id = ?
@@ -2820,13 +2824,15 @@ async function getAdminFoodItemOptions() {
 }
 
 async function buildAdminSystemStatus() {
-    const [recipes, recipeIngredients, inventoryItems, inventoryBatches, inventoryLooseStock, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
-        getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('inventory_loose_stock'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
+    const [recipes, recipeIngredients, inventoryItems, inventoryBatches, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
+        getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
     ]);
+    const looseCountRow = await get(`SELECT COUNT(*) AS count FROM inventory_batches WHERE COALESCE(batch_type, '') = 'loose'`).catch(() => ({ count: 0 }));
+    const inventoryLooseStock = Number(looseCountRow?.count || 0);
     const stockRows = await all(`
-        SELECT item_id, SUM(amount) AS amount FROM inventory_loose_stock GROUP BY item_id
+        SELECT item_id, SUM(remaining_weight) AS amount FROM inventory_batches WHERE COALESCE(batch_type, '') = 'loose' GROUP BY item_id
         UNION ALL
-        SELECT item_id, SUM(remaining_quantity) AS amount FROM inventory_batches GROUP BY item_id
+        SELECT item_id, SUM(remaining_quantity) AS amount FROM inventory_batches WHERE COALESCE(batch_type, 'package') != 'loose' GROUP BY item_id
     `).catch(() => []);
     const itemStock = new Map();
     stockRows.forEach(row => {
@@ -3116,7 +3122,6 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [])
             for (const inv of duplicateInventoryRows) {
                 if (masterInventory && Number(inv.id) !== Number(masterInventory.id)) {
                     await run(`UPDATE inventory_batches SET item_id = ?, updated_at = CURRENT_TIMESTAMP WHERE item_id = ?`, [masterInventory.id, inv.id]);
-                    await run(`UPDATE inventory_loose_stock SET item_id = ?, updated_at = CURRENT_TIMESTAMP WHERE item_id = ?`, [masterInventory.id, inv.id]);
                     await run(`DELETE FROM inventory_items WHERE id = ?`, [inv.id]);
                     await recalculateInventoryItem(masterInventory.id);
                 } else {
