@@ -3056,6 +3056,97 @@ app.put("/admin/food-aliases/:id", async (req, res) => {
     }
 });
 
+async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = []) {
+    const masterId = Number(masterFoodItemId);
+    const duplicateIds = Array.from(new Set((Array.isArray(duplicateFoodItemIds) ? duplicateFoodItemIds : [])
+        .map(Number)
+        .filter(id => Number.isFinite(id) && id !== masterId)));
+
+    if (!Number.isFinite(masterId) || duplicateIds.length === 0) {
+        throw new Error("Ein Master-Lebensmittel und mindestens eine Dublette sind erforderlich.");
+    }
+
+    await run("BEGIN");
+    try {
+        const master = await get(`SELECT * FROM food_items WHERE id = ?`, [masterId]);
+        if (!master) throw new Error("Master-Lebensmittel wurde nicht gefunden.");
+
+        const duplicates = [];
+        for (const duplicateId of duplicateIds) {
+            const duplicate = await get(`SELECT * FROM food_items WHERE id = ?`, [duplicateId]);
+            if (!duplicate) continue;
+            duplicates.push(duplicate);
+        }
+        if (!duplicates.length) throw new Error("Keine gültigen Dubletten gefunden.");
+
+        let masterInventory = await get(`SELECT * FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [masterId]);
+
+        if (!masterInventory) {
+            const firstDuplicateInventory = await get(
+                `SELECT * FROM inventory_items WHERE food_item_id IN (${duplicates.map(() => "?").join(",")}) ORDER BY id ASC LIMIT 1`,
+                duplicates.map(d => d.id)
+            );
+            if (firstDuplicateInventory) {
+                await run(
+                    `UPDATE inventory_items
+                     SET food_item_id = ?, canonical_name = ?, name = COALESCE(NULLIF(name, ''), ?), updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?`,
+                    [masterId, master.canonical_key || "", master.display_name || firstDuplicateInventory.name || "", firstDuplicateInventory.id]
+                );
+                masterInventory = await get(`SELECT * FROM inventory_items WHERE id = ?`, [firstDuplicateInventory.id]);
+            }
+        }
+
+        const merged = [];
+        for (const duplicate of duplicates) {
+            await addFoodAlias(masterId, duplicate.display_name);
+            await addFoodAlias(masterId, duplicate.canonical_key);
+
+            const aliases = await all(`SELECT alias_name FROM food_aliases WHERE food_item_id = ?`, [duplicate.id]);
+            for (const alias of aliases) await addFoodAlias(masterId, alias.alias_name);
+
+            await run(
+                `UPDATE recipe_ingredients
+                 SET food_item_id = ?, canonical_key = ?, link_source = CASE WHEN link_source = 'manual_unlinked' THEN 'manual' ELSE COALESCE(NULLIF(link_source, ''), 'manual') END, updated_at = CURRENT_TIMESTAMP
+                 WHERE food_item_id = ?`,
+                [masterId, master.canonical_key || "", duplicate.id]
+            );
+
+            const duplicateInventoryRows = await all(`SELECT * FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC`, [duplicate.id]);
+            for (const inv of duplicateInventoryRows) {
+                if (masterInventory && Number(inv.id) !== Number(masterInventory.id)) {
+                    await run(`UPDATE inventory_batches SET item_id = ?, updated_at = CURRENT_TIMESTAMP WHERE item_id = ?`, [masterInventory.id, inv.id]);
+                    await run(`UPDATE inventory_loose_stock SET item_id = ?, updated_at = CURRENT_TIMESTAMP WHERE item_id = ?`, [masterInventory.id, inv.id]);
+                    await run(`DELETE FROM inventory_items WHERE id = ?`, [inv.id]);
+                    await recalculateInventoryItem(masterInventory.id);
+                } else {
+                    await run(
+                        `UPDATE inventory_items
+                         SET food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [masterId, master.canonical_key || "", inv.id]
+                    );
+                    masterInventory = await get(`SELECT * FROM inventory_items WHERE id = ?`, [inv.id]);
+                }
+            }
+
+            await run(`DELETE FROM food_aliases WHERE food_item_id = ?`, [duplicate.id]);
+            await run(`DELETE FROM food_items WHERE id = ?`, [duplicate.id]);
+            merged.push({ id: duplicate.id, display_name: duplicate.display_name, canonical_key: duplicate.canonical_key });
+        }
+
+        await run("COMMIT");
+        return {
+            master: await getFoodItemAdminDetail(masterId),
+            merged
+        };
+    } catch (error) {
+        await run("ROLLBACK");
+        throw error;
+    }
+}
+
+
 app.delete("/admin/food-aliases/:id", async (req, res) => {
     try {
         const aliasId = Number(req.params.id);
@@ -3068,6 +3159,22 @@ app.delete("/admin/food-aliases/:id", async (req, res) => {
         res.status(500).json({ error: error.message || "Alias konnte nicht gelöscht werden." });
     }
 });
+
+app.post("/admin/food-items/consolidate", async (req, res) => {
+    try {
+        const result = await consolidateFoodItems(req.body?.master_food_item_id, req.body?.duplicate_food_item_ids || []);
+        res.json({
+            success: true,
+            result,
+            table: await getAdminTablePreview("food_items"),
+            system_status: await buildAdminSystemStatus()
+        });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/food-items/consolidate:", error.message);
+        res.status(500).json({ error: error.message || "Lebensmittel-Stammdaten konnten nicht konsolidiert werden." });
+    }
+});
+
 
 app.put("/admin/recipe-ingredients/:id/link", async (req, res) => {
     try {
