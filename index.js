@@ -2636,6 +2636,111 @@ async function getDatabaseTableNames() {
     return rows.map(row => row.name);
 }
 
+
+function quoteSqlIdentifier(identifier) {
+    const text = String(identifier || "");
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+        throw new Error("Ungültiger Tabellenname.");
+    }
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+async function getAdminTablePreview(tableName, limit = 200) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+    const tableNames = await getDatabaseTableNames();
+    if (!tableNames.includes(tableName)) {
+        throw new Error("Tabelle wurde nicht gefunden.");
+    }
+
+    const quotedTable = quoteSqlIdentifier(tableName);
+    const columns = await all(`PRAGMA table_info(${quotedTable})`);
+    const columnNames = columns.map(col => col.name);
+
+    let rows;
+    if (tableName === "food_aliases") {
+        rows = await all(`
+            SELECT
+                fa.id,
+                fa.alias_name,
+                fa.alias_key,
+                fa.food_item_id,
+                fi.display_name AS target_food_item,
+                fi.canonical_key AS target_canonical_key,
+                fa.created_at
+            FROM food_aliases fa
+            LEFT JOIN food_items fi ON fi.id = fa.food_item_id
+            ORDER BY fa.alias_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "food_items") {
+        rows = await all(`
+            SELECT
+                fi.*,
+                COUNT(DISTINCT fa.id) AS alias_count,
+                COUNT(DISTINCT ri.id) AS recipe_ingredient_count
+            FROM food_items fi
+            LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+            GROUP BY fi.id
+            ORDER BY fi.display_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "recipe_ingredients") {
+        rows = await all(`
+            SELECT
+                ri.id,
+                ri.recipe_id,
+                r.name AS recipe_name,
+                ri.raw_text,
+                ri.food_name,
+                ri.amount,
+                ri.unit,
+                ri.food_item_id,
+                fi.display_name AS linked_food_item,
+                ri.link_source,
+                ri.canonical_key,
+                ri.sort_order,
+                ri.updated_at
+            FROM recipe_ingredients ri
+            LEFT JOIN recipes r ON r.id = ri.recipe_id
+            LEFT JOIN food_items fi ON fi.id = ri.food_item_id
+            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "inventory_items") {
+        rows = await all(`
+            SELECT
+                ii.*,
+                COALESCE(batch_stock.amount, 0) AS package_stock,
+                COALESCE(loose_stock.amount, 0) AS loose_stock,
+                COALESCE(batch_stock.amount, 0) + COALESCE(loose_stock.amount, 0) AS total_stock
+            FROM inventory_items ii
+            LEFT JOIN (
+                SELECT item_id, SUM(remaining_quantity) AS amount
+                FROM inventory_batches
+                GROUP BY item_id
+            ) batch_stock ON batch_stock.item_id = ii.id
+            LEFT JOIN (
+                SELECT item_id, SUM(amount) AS amount
+                FROM inventory_loose_stock
+                GROUP BY item_id
+            ) loose_stock ON loose_stock.item_id = ii.id
+            ORDER BY ii.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else {
+        rows = await all(`SELECT * FROM ${quotedTable} LIMIT ?`, [safeLimit]);
+    }
+
+    return {
+        table: tableName,
+        limit: safeLimit,
+        total_count: await getTableCountSafe(tableName),
+        columns: rows.length ? Object.keys(rows[0]) : columnNames,
+        rows
+    };
+}
+
 async function buildAdminSystemStatus() {
     const [recipes, recipeIngredients, inventoryItems, inventoryBatches, inventoryLooseStock, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
         getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('inventory_loose_stock'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
@@ -2820,6 +2925,18 @@ app.get("/admin/system-status", async (req, res) => {
     } catch (error) {
         console.error("Fehler bei GET /admin/system-status:", error.message);
         res.status(500).json({ error: "Systemstatus konnte nicht geladen werden" });
+    }
+});
+
+
+app.get("/admin/tables/:tableName", async (req, res) => {
+    try {
+        const preview = await getAdminTablePreview(req.params.tableName, req.query.limit);
+        res.json(preview);
+    } catch (error) {
+        console.error("Fehler bei GET /admin/tables/:tableName:", error.message);
+        const status = /nicht gefunden|Ungültiger/.test(error.message) ? 404 : 500;
+        res.status(status).json({ error: error.message || "Tabelle konnte nicht geladen werden." });
     }
 });
 
