@@ -2741,6 +2741,84 @@ async function getAdminTablePreview(tableName, limit = 200) {
     };
 }
 
+
+
+async function getFoodItemAdminDetail(foodItemId) {
+    const id = Number(foodItemId);
+    if (!Number.isFinite(id)) throw new Error("Ungültige Lebensmittel-ID.");
+    const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
+    if (!item) throw new Error("Lebensmittel-Stammsatz wurde nicht gefunden.");
+
+    const aliases = await all(`
+        SELECT id, alias_name, alias_key, created_at
+        FROM food_aliases
+        WHERE food_item_id = ?
+        ORDER BY alias_name COLLATE NOCASE ASC
+    `, [id]);
+
+    const recipeIngredients = await all(`
+        SELECT
+            ri.id,
+            ri.recipe_id,
+            r.name AS recipe_name,
+            ri.raw_text,
+            ri.food_name,
+            ri.amount,
+            ri.unit,
+            ri.link_source,
+            ri.sort_order,
+            ri.updated_at
+        FROM recipe_ingredients ri
+        LEFT JOIN recipes r ON r.id = ri.recipe_id
+        WHERE ri.food_item_id = ?
+        ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+    `, [id]);
+
+    const inventoryItems = await all(`
+        SELECT
+            ii.id,
+            ii.name,
+            ii.unit,
+            ii.source,
+            ii.canonical_name,
+            ii.calories_per_100g,
+            COALESCE(batch_stock.amount, 0) AS package_stock,
+            COALESCE(loose_stock.amount, 0) AS loose_stock,
+            COALESCE(batch_stock.amount, 0) + COALESCE(loose_stock.amount, 0) AS total_stock
+        FROM inventory_items ii
+        LEFT JOIN (
+            SELECT item_id, SUM(remaining_quantity) AS amount
+            FROM inventory_batches
+            GROUP BY item_id
+        ) batch_stock ON batch_stock.item_id = ii.id
+        LEFT JOIN (
+            SELECT item_id, SUM(amount) AS amount
+            FROM inventory_loose_stock
+            GROUP BY item_id
+        ) loose_stock ON loose_stock.item_id = ii.id
+        WHERE ii.food_item_id = ?
+        ORDER BY ii.name COLLATE NOCASE ASC
+    `, [id]);
+
+    return { item, aliases, recipe_ingredients: recipeIngredients, inventory_items: inventoryItems };
+}
+
+async function getAdminFoodItemOptions() {
+    return all(`
+        SELECT
+            fi.id,
+            fi.display_name,
+            fi.canonical_key,
+            COUNT(DISTINCT fa.id) AS alias_count,
+            COUNT(DISTINCT ri.id) AS recipe_ingredient_count
+        FROM food_items fi
+        LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+        LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+        GROUP BY fi.id
+        ORDER BY fi.display_name COLLATE NOCASE ASC
+    `);
+}
+
 async function buildAdminSystemStatus() {
     const [recipes, recipeIngredients, inventoryItems, inventoryBatches, inventoryLooseStock, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
         getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('inventory_loose_stock'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
@@ -2918,6 +2996,102 @@ app.post("/admin/recipe-resync-apply", async (req, res) => {
 
 
 
+
+
+
+app.get("/admin/food-items", async (req, res) => {
+    try {
+        res.json({ items: await getAdminFoodItemOptions() });
+    } catch (error) {
+        console.error("Fehler bei GET /admin/food-items:", error.message);
+        res.status(500).json({ error: "Lebensmittel-Stammdaten konnten nicht geladen werden." });
+    }
+});
+
+app.get("/admin/food-items/:id/detail", async (req, res) => {
+    try {
+        res.json(await getFoodItemAdminDetail(req.params.id));
+    } catch (error) {
+        console.error("Fehler bei GET /admin/food-items/:id/detail:", error.message);
+        const status = /nicht gefunden|Ungültige/.test(error.message) ? 404 : 500;
+        res.status(status).json({ error: error.message || "Lebensmittel-Details konnten nicht geladen werden." });
+    }
+});
+
+app.post("/admin/food-aliases", async (req, res) => {
+    try {
+        const foodItemId = Number(req.body?.food_item_id);
+        const aliasName = String(req.body?.alias_name || "").trim();
+        if (!Number.isFinite(foodItemId)) return res.status(400).json({ error: "Ziel-Lebensmittel ist erforderlich." });
+        if (!aliasName) return res.status(400).json({ error: "Alias ist erforderlich." });
+        const item = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
+        if (!item) return res.status(404).json({ error: "Ziel-Lebensmittel wurde nicht gefunden." });
+        await addFoodAlias(foodItemId, aliasName);
+        res.json({ success: true, detail: await getFoodItemAdminDetail(foodItemId), table: await getAdminTablePreview("food_aliases") });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/food-aliases:", error.message);
+        res.status(500).json({ error: error.message || "Alias konnte nicht angelegt werden." });
+    }
+});
+
+app.put("/admin/food-aliases/:id", async (req, res) => {
+    try {
+        const aliasId = Number(req.params.id);
+        const foodItemId = Number(req.body?.food_item_id);
+        const aliasName = String(req.body?.alias_name || "").trim();
+        if (!Number.isFinite(aliasId)) return res.status(400).json({ error: "Ungültiger Alias." });
+        if (!Number.isFinite(foodItemId)) return res.status(400).json({ error: "Ziel-Lebensmittel ist erforderlich." });
+        if (!aliasName) return res.status(400).json({ error: "Alias ist erforderlich." });
+        const alias = await get(`SELECT * FROM food_aliases WHERE id = ?`, [aliasId]);
+        if (!alias) return res.status(404).json({ error: "Alias wurde nicht gefunden." });
+        const item = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
+        if (!item) return res.status(404).json({ error: "Ziel-Lebensmittel wurde nicht gefunden." });
+        const aliasKey = buildFoodIdentity(aliasName).canonical_key || aliasName.toLowerCase().trim();
+        await run(`UPDATE food_aliases SET food_item_id = ?, alias_name = ?, alias_key = ? WHERE id = ?`, [foodItemId, aliasName, aliasKey, aliasId]);
+        res.json({ success: true, detail: await getFoodItemAdminDetail(foodItemId), table: await getAdminTablePreview("food_aliases") });
+    } catch (error) {
+        console.error("Fehler bei PUT /admin/food-aliases/:id:", error.message);
+        const status = /UNIQUE/.test(error.message) ? 409 : 500;
+        res.status(status).json({ error: status === 409 ? "Dieser Alias existiert für das Ziel-Lebensmittel bereits." : (error.message || "Alias konnte nicht aktualisiert werden.") });
+    }
+});
+
+app.delete("/admin/food-aliases/:id", async (req, res) => {
+    try {
+        const aliasId = Number(req.params.id);
+        const alias = await get(`SELECT * FROM food_aliases WHERE id = ?`, [aliasId]);
+        if (!alias) return res.status(404).json({ error: "Alias wurde nicht gefunden." });
+        await run(`DELETE FROM food_aliases WHERE id = ?`, [aliasId]);
+        res.json({ success: true, deleted_alias: alias, detail: await getFoodItemAdminDetail(alias.food_item_id), table: await getAdminTablePreview("food_aliases") });
+    } catch (error) {
+        console.error("Fehler bei DELETE /admin/food-aliases/:id:", error.message);
+        res.status(500).json({ error: error.message || "Alias konnte nicht gelöscht werden." });
+    }
+});
+
+app.put("/admin/recipe-ingredients/:id/link", async (req, res) => {
+    try {
+        const ingredientId = Number(req.params.id);
+        const rawFoodItemId = req.body?.food_item_id;
+        const ingredient = await get(`SELECT * FROM recipe_ingredients WHERE id = ?`, [ingredientId]);
+        if (!ingredient) return res.status(404).json({ error: "Rezept-Zutat wurde nicht gefunden." });
+
+        if (rawFoodItemId === null || rawFoodItemId === "" || rawFoodItemId === undefined) {
+            await run(`UPDATE recipe_ingredients SET food_item_id = NULL, canonical_key = '', link_source = 'manual_unlinked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [ingredientId]);
+            return res.json({ success: true, ingredient: await get(`SELECT * FROM recipe_ingredients WHERE id = ?`, [ingredientId]) });
+        }
+
+        const foodItemId = Number(rawFoodItemId);
+        if (!Number.isFinite(foodItemId)) return res.status(400).json({ error: "Ungültiger Lebensmittel-Stammsatz." });
+        const item = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
+        if (!item) return res.status(404).json({ error: "Lebensmittel-Stammsatz wurde nicht gefunden." });
+        await run(`UPDATE recipe_ingredients SET food_item_id = ?, canonical_key = ?, link_source = 'manual', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [foodItemId, item.canonical_key || '', ingredientId]);
+        res.json({ success: true, ingredient: await get(`SELECT * FROM recipe_ingredients WHERE id = ?`, [ingredientId]), detail: await getFoodItemAdminDetail(foodItemId) });
+    } catch (error) {
+        console.error("Fehler bei PUT /admin/recipe-ingredients/:id/link:", error.message);
+        res.status(500).json({ error: error.message || "Rezept-Zutat konnte nicht verknüpft werden." });
+    }
+});
 
 app.get("/admin/system-status", async (req, res) => {
     try {
