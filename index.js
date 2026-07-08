@@ -125,6 +125,35 @@ async function ensureSchema() {
     `);
 
     await run(`
+        CREATE TABLE IF NOT EXISTS health_factors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await run(`
+        CREATE TABLE IF NOT EXISTS food_item_health_factors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            food_item_id INTEGER NOT NULL,
+            health_factor_id INTEGER NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(food_item_id, health_factor_id),
+            FOREIGN KEY (food_item_id) REFERENCES food_items(id) ON DELETE CASCADE,
+            FOREIGN KEY (health_factor_id) REFERENCES health_factors(id) ON DELETE CASCADE
+        )
+    `);
+
+    await addColumnIfMissing("health_factors", "category", "TEXT DEFAULT ''");
+    await addColumnIfMissing("health_factors", "description", "TEXT DEFAULT ''");
+    await addColumnIfMissing("health_factors", "updated_at", "TEXT DEFAULT ''");
+    await addColumnIfMissing("food_item_health_factors", "notes", "TEXT DEFAULT ''");
+
+    await run(`
         CREATE TABLE IF NOT EXISTS admin_ignored_duplicate_pairs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             item_id_a INTEGER NOT NULL,
@@ -2677,10 +2706,13 @@ async function getAdminTablePreview(tableName, limit = 200) {
             SELECT
                 fi.*,
                 COUNT(DISTINCT fa.id) AS alias_count,
-                COUNT(DISTINCT ri.id) AS recipe_ingredient_count
+                COUNT(DISTINCT ri.id) AS recipe_ingredient_count,
+                COALESCE(GROUP_CONCAT(DISTINCT hf.name), '') AS health_factors
             FROM food_items fi
             LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
             LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+            LEFT JOIN food_item_health_factors fihf ON fihf.food_item_id = fi.id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
             GROUP BY fi.id
             ORDER BY fi.display_name COLLATE NOCASE ASC
             LIMIT ?
@@ -2728,6 +2760,34 @@ async function getAdminTablePreview(tableName, limit = 200) {
                 GROUP BY item_id
             ) loose_stock ON loose_stock.item_id = ii.id
             ORDER BY ii.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "health_factors") {
+        rows = await all(`
+            SELECT
+                hf.*,
+                COUNT(DISTINCT fihf.food_item_id) AS food_item_count
+            FROM health_factors hf
+            LEFT JOIN food_item_health_factors fihf ON fihf.health_factor_id = hf.id
+            GROUP BY hf.id
+            ORDER BY hf.category COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "food_item_health_factors") {
+        rows = await all(`
+            SELECT
+                fihf.id,
+                fihf.food_item_id,
+                fi.display_name AS food_item,
+                fihf.health_factor_id,
+                hf.name AS health_factor,
+                hf.category,
+                fihf.notes,
+                fihf.created_at
+            FROM food_item_health_factors fihf
+            LEFT JOIN food_items fi ON fi.id = fihf.food_item_id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
+            ORDER BY fi.display_name COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
             LIMIT ?
         `, [safeLimit]);
     } else {
@@ -2804,7 +2864,20 @@ async function getFoodItemAdminDetail(foodItemId) {
         ORDER BY ii.name COLLATE NOCASE ASC
     `, [id]);
 
-    return { item, aliases, recipe_ingredients: recipeIngredients, inventory_items: inventoryItems };
+    const healthFactors = await all(`
+        SELECT
+            hf.id,
+            hf.name,
+            hf.category,
+            hf.description,
+            fihf.notes
+        FROM food_item_health_factors fihf
+        JOIN health_factors hf ON hf.id = fihf.health_factor_id
+        WHERE fihf.food_item_id = ?
+        ORDER BY hf.category COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+    `, [id]);
+
+    return { item, aliases, recipe_ingredients: recipeIngredients, inventory_items: inventoryItems, health_factors: healthFactors };
 }
 
 async function getAdminFoodItemOptions() {
@@ -3004,6 +3077,150 @@ app.post("/admin/recipe-resync-apply", async (req, res) => {
 
 
 
+
+
+async function getHealthFactorOptions() {
+    return all(`
+        SELECT id, name, category, description
+        FROM health_factors
+        ORDER BY category COLLATE NOCASE ASC, name COLLATE NOCASE ASC
+    `);
+}
+
+async function replaceFoodItemHealthFactors(foodItemId, healthFactorIds = []) {
+    const id = Number(foodItemId);
+    if (!Number.isFinite(id)) throw new Error("Ungültige Lebensmittel-ID.");
+    const uniqueIds = Array.from(new Set((Array.isArray(healthFactorIds) ? healthFactorIds : [])
+        .map(Number)
+        .filter(Number.isFinite)));
+    await run(`DELETE FROM food_item_health_factors WHERE food_item_id = ?`, [id]);
+    for (const factorId of uniqueIds) {
+        const factor = await get(`SELECT id FROM health_factors WHERE id = ?`, [factorId]);
+        if (factor) {
+            await run(`INSERT OR IGNORE INTO food_item_health_factors (food_item_id, health_factor_id) VALUES (?, ?)`, [id, factorId]);
+        }
+    }
+}
+
+async function getFoodItemStockTotalByFoodItem(foodItemId) {
+    const row = await get(`
+        SELECT
+            COALESCE(SUM(CASE WHEN COALESCE(ib.batch_type, 'package') = 'loose' THEN COALESCE(ib.remaining_weight, 0) ELSE COALESCE(ib.remaining_quantity, 0) END), 0) AS total_stock
+        FROM inventory_items ii
+        LEFT JOIN inventory_batches ib ON ib.item_id = ii.id
+        WHERE ii.food_item_id = ?
+    `, [Number(foodItemId)]);
+    return Number(row?.total_stock || 0);
+}
+
+app.get("/admin/health-factors", async (req, res) => {
+    try {
+        res.json({ factors: await getHealthFactorOptions() });
+    } catch (error) {
+        console.error("Fehler bei GET /admin/health-factors:", error.message);
+        res.status(500).json({ error: "Gesundheits-/Diätfaktoren konnten nicht geladen werden." });
+    }
+});
+
+app.post("/admin/health-factors", async (req, res) => {
+    try {
+        const name = String(req.body?.name || "").trim();
+        const category = String(req.body?.category || "").trim();
+        const description = String(req.body?.description || "").trim();
+        if (!name) return res.status(400).json({ error: "Name ist erforderlich." });
+        await run(`INSERT INTO health_factors (name, category, description, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, [name, category, description]);
+        res.json({ success: true, factors: await getHealthFactorOptions(), table: await getAdminTablePreview("health_factors") });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/health-factors:", error.message);
+        const status = /UNIQUE/.test(error.message) ? 409 : 500;
+        res.status(status).json({ error: status === 409 ? "Dieser Faktor existiert bereits." : (error.message || "Faktor konnte nicht angelegt werden.") });
+    }
+});
+
+app.put("/admin/health-factors/:id", async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        const name = String(req.body?.name || "").trim();
+        const category = String(req.body?.category || "").trim();
+        const description = String(req.body?.description || "").trim();
+        if (!Number.isFinite(id)) return res.status(400).json({ error: "Ungültiger Faktor." });
+        if (!name) return res.status(400).json({ error: "Name ist erforderlich." });
+        const existing = await get(`SELECT id FROM health_factors WHERE id = ?`, [id]);
+        if (!existing) return res.status(404).json({ error: "Faktor wurde nicht gefunden." });
+        await run(`UPDATE health_factors SET name = ?, category = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [name, category, description, id]);
+        res.json({ success: true, factors: await getHealthFactorOptions(), table: await getAdminTablePreview("health_factors") });
+    } catch (error) {
+        console.error("Fehler bei PUT /admin/health-factors/:id:", error.message);
+        const status = /UNIQUE/.test(error.message) ? 409 : 500;
+        res.status(status).json({ error: status === 409 ? "Dieser Faktor existiert bereits." : (error.message || "Faktor konnte nicht aktualisiert werden.") });
+    }
+});
+
+app.delete("/admin/health-factors/:id", async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ error: "Ungültiger Faktor." });
+        await run(`DELETE FROM food_item_health_factors WHERE health_factor_id = ?`, [id]);
+        const result = await run(`DELETE FROM health_factors WHERE id = ?`, [id]);
+        if (result.changes === 0) return res.status(404).json({ error: "Faktor wurde nicht gefunden." });
+        res.json({ success: true, factors: await getHealthFactorOptions(), table: await getAdminTablePreview("health_factors") });
+    } catch (error) {
+        console.error("Fehler bei DELETE /admin/health-factors/:id:", error.message);
+        res.status(500).json({ error: error.message || "Faktor konnte nicht gelöscht werden." });
+    }
+});
+
+app.put("/admin/food-items/:id", async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        const displayName = String(req.body?.display_name || "").trim();
+        const caloriesRaw = req.body?.calories_per_100g;
+        const calories = caloriesRaw === null || caloriesRaw === undefined || caloriesRaw === "" ? null : Number(caloriesRaw);
+        if (!Number.isFinite(id)) return res.status(400).json({ error: "Ungültiger Lebensmittel-Stammsatz." });
+        if (!displayName) return res.status(400).json({ error: "Anzeigename ist erforderlich." });
+        if (calories !== null && (!Number.isFinite(calories) || calories < 0)) return res.status(400).json({ error: "kcal / 100 g ist ungültig." });
+        const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
+        if (!item) return res.status(404).json({ error: "Lebensmittel-Stammsatz wurde nicht gefunden." });
+        const canonicalKey = buildFoodIdentity(displayName).canonical_key || normalizeText(displayName);
+        const conflicting = await get(`SELECT id, display_name FROM food_items WHERE canonical_key = ? AND id <> ?`, [canonicalKey, id]);
+        if (conflicting) return res.status(409).json({ error: `Der interne Schlüssel wird bereits von „${conflicting.display_name}“ genutzt. Bitte ggf. über Zusammenführen konsolidieren.` });
+        await run(`UPDATE food_items SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [displayName, canonicalKey, calories, id]);
+        await replaceFoodItemHealthFactors(id, req.body?.health_factor_ids || []);
+        res.json({ success: true, detail: await getFoodItemAdminDetail(id), table: await getAdminTablePreview("food_items") });
+    } catch (error) {
+        console.error("Fehler bei PUT /admin/food-items/:id:", error.message);
+        const status = /UNIQUE/.test(error.message) ? 409 : 500;
+        res.status(status).json({ error: error.message || "Lebensmittel-Stammsatz konnte nicht gespeichert werden." });
+    }
+});
+
+app.delete("/admin/food-items/:id", async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ error: "Ungültiger Lebensmittel-Stammsatz." });
+        const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
+        if (!item) return res.status(404).json({ error: "Lebensmittel-Stammsatz wurde nicht gefunden." });
+        const totalStock = await getFoodItemStockTotalByFoodItem(id);
+        if (totalStock > 0) return res.status(409).json({ error: "Dieser Stammsatz hat Bestand und kann nicht direkt gelöscht werden. Bestand zuerst verschieben oder Stammsatz konsolidieren." });
+        await run("BEGIN");
+        try {
+            await run(`DELETE FROM food_aliases WHERE food_item_id = ?`, [id]);
+            await run(`DELETE FROM food_item_health_factors WHERE food_item_id = ?`, [id]);
+            await run(`UPDATE recipe_ingredients SET food_item_id = NULL, canonical_key = '', link_source = 'manual_unlinked', updated_at = CURRENT_TIMESTAMP WHERE food_item_id = ?`, [id]);
+            await run(`UPDATE inventory_items SET food_item_id = NULL, canonical_name = '', updated_at = CURRENT_TIMESTAMP WHERE food_item_id = ?`, [id]);
+            await run(`DELETE FROM food_items WHERE id = ?`, [id]);
+            await run("COMMIT");
+        } catch (inner) {
+            await run("ROLLBACK");
+            throw inner;
+        }
+        res.json({ success: true, deleted_item: item, table: await getAdminTablePreview("food_items"), system_status: await buildAdminSystemStatus() });
+    } catch (error) {
+        console.error("Fehler bei DELETE /admin/food-items/:id:", error.message);
+        const status = /Bestand|nicht gefunden|Ungültiger/.test(error.message) ? 409 : 500;
+        res.status(status).json({ error: error.message || "Lebensmittel-Stammsatz konnte nicht gelöscht werden." });
+    }
+});
 
 app.get("/admin/food-items", async (req, res) => {
     try {
