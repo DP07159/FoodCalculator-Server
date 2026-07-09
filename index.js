@@ -741,7 +741,7 @@ async function ensureInventoryItemForFoodItem(foodItem, ingredient, { source = "
 async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = [], options = {}) {
     const { createMissing = true } = options;
     const previousLinks = await all(
-        `SELECT sort_order, raw_text, food_name, food_item_id, link_source
+        `SELECT sort_order, raw_text, food_name, canonical_key, food_item_id, link_source
          FROM recipe_ingredients
          WHERE recipe_id = ?`,
         [recipeId]
@@ -767,10 +767,18 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
         }
 
         if (!foodItem) {
+            // Strikte automatische Zuordnung: nur exakter Stammdaten-/Alias-Treffer.
+            // Keine Teiltreffer, keine Ähnlichkeitssuche, keine sichtbare Namenskorrektur.
+            foodItem = await findFoodItemByName(ingredient.food_name);
+            if (foodItem) {
+                linkSource = "auto_exact";
+            }
+        }
+
+        if (!foodItem) {
             if (!createMissing) continue;
-            // Wichtig: keine unsichere automatische Zusammenführung.
-            // Wenn der User keinen Vorschlag auswählt, entsteht bewusst ein neuer Lebensmittel-Stammsatz.
             foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
+            linkSource = "new_from_recipe";
         }
 
         await run(
@@ -1079,6 +1087,57 @@ async function addFoodAlias(foodItemId, aliasName) {
         `INSERT OR IGNORE INTO food_aliases (food_item_id, alias_name, alias_key) VALUES (?, ?, ?)`,
         [foodItemId, alias, aliasKey]
     );
+}
+
+async function renameFoodItemStable(foodItemId, displayName, { calories_per_100g = undefined, updateCanonical = true } = {}) {
+    const id = Number(foodItemId);
+    const nextName = String(displayName || "").trim();
+    if (!Number.isFinite(id)) throw new Error("Ungültiger Lebensmittel-Stammsatz.");
+    if (!nextName) throw new Error("Anzeigename ist erforderlich.");
+
+    const current = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
+    if (!current) throw new Error("Lebensmittel-Stammsatz wurde nicht gefunden.");
+
+    const nextCanonical = buildFoodIdentity(nextName).canonical_key || canonicalizeIngredientName(nextName) || current.canonical_key;
+    let canonicalToStore = current.canonical_key;
+
+    if (updateCanonical && nextCanonical) {
+        const conflicting = await get(`SELECT id, display_name FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`, [nextCanonical, id]);
+        if (!conflicting) canonicalToStore = nextCanonical;
+    }
+
+    const calories = calories_per_100g === undefined
+        ? current.calories_per_100g
+        : (calories_per_100g === null || calories_per_100g === "" ? null : Number(calories_per_100g));
+
+    await addFoodAlias(id, current.display_name);
+    if (current.canonical_key) await addFoodAlias(id, current.canonical_key);
+    await addFoodAlias(id, nextName);
+
+    await run(
+        `UPDATE food_items
+         SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [nextName, canonicalToStore, calories, id]
+    );
+
+    // Legacy-Synchronisierung: food_items bleibt die Wahrheit, aber alte Inventarspalten werden mitgezogen,
+    // damit keine veralteten Fallback-Namen in älteren Frontend-/Admin-Ansichten auftauchen.
+    await run(
+        `UPDATE inventory_items
+         SET name = ?, canonical_name = ?, calories_per_100g = COALESCE(?, calories_per_100g), updated_at = CURRENT_TIMESTAMP
+         WHERE food_item_id = ?`,
+        [nextName, canonicalToStore, calories, id]
+    );
+
+    await run(
+        `UPDATE recipe_ingredients
+         SET canonical_key = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE food_item_id = ?`,
+        [canonicalToStore, id]
+    );
+
+    return get(`SELECT * FROM food_items WHERE id = ?`, [id]);
 }
 
 async function getOrCreateFoodItem(name, { calories_per_100g = null, aliasName = "" } = {}) {
@@ -1443,8 +1502,7 @@ async function getRecipeIngredientLinks(recipeId) {
     return rows.map(row => ({
         line_index: Number(row.line_index) || 0,
         raw_text: row.raw_text || "",
-        food_name: row.food_name || "",
-        food_display_name: row.food_display_name || "",
+        food_name: row.food_display_name || row.food_name || "",
         stored_food_name: row.food_name || "",
         amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
         unit: row.unit || "",
@@ -1772,9 +1830,10 @@ async function mergeInventoryItemsInternal(masterItemId, duplicateItemId) {
              calories_per_100g = COALESCE(calories_per_100g, ?),
              food_item_id = ?,
              canonical_name = ?,
+             name = ?,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [duplicate.unit || "", duplicate.recipe_match_name || duplicate.name || "", duplicate.calories_per_100g ?? null, masterFood.id, masterFood.canonical_key, masterId]
+        [duplicate.unit || "", duplicate.recipe_match_name || duplicate.name || "", duplicate.calories_per_100g ?? null, masterFood.id, masterFood.canonical_key, masterFood.display_name || master.name || "", masterId]
     );
 
     await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a IN (?, ?) OR item_id_b IN (?, ?)`, [masterId, duplicateId, masterId, duplicateId]);
@@ -1817,9 +1876,19 @@ async function mergeInventoryItemsIntoMaster(masterItemId, duplicateItemIds = []
             mergedItems.push(result.merged_item);
         }
         const master = await get(`SELECT * FROM inventory_items WHERE id = ?`, [masterId]);
+        const masterFood = master?.food_item_id ? await get(`SELECT * FROM food_items WHERE id = ?`, [master.food_item_id]) : null;
+        if (masterFood) {
+            await run(
+                `UPDATE inventory_items
+                 SET name = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE food_item_id = ?`,
+                [masterFood.display_name || master.name || "", masterFood.canonical_key || "", masterFood.id]
+            );
+        }
+
         await run("COMMIT");
         return {
-            master_item: { id: masterId, name: master?.name || "Zielartikel" },
+            master_item: { id: masterId, name: masterFood?.display_name || master?.name || "Zielartikel" },
             merged_items: mergedItems
         };
     } catch (error) {
@@ -2397,8 +2466,7 @@ app.get("/recipes/:id/stock-check", async (req, res) => {
         const parsedIngredients = linkedIngredients.length
             ? linkedIngredients.map(row => ({
                 raw_text: row.raw_text || "",
-                food_name: row.food_name || "",
-                food_display_name: row.food_display_name || "",
+                food_name: row.food_display_name || row.food_name || "",
                 amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
                 unit: row.unit || "",
                 original_unit: row.unit || "",
@@ -2572,18 +2640,10 @@ app.put("/inventory/:id", async (req, res) => {
             // Sie darf niemals auf einen anderen food_item wechseln, sonst verlieren Rezepte/Aliase ihre Zuordnung.
             const currentFoodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
             if (currentFoodItem) {
-                const conflictingFoodItem = await get(
-                    `SELECT * FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`,
-                    [canonicalKey, existing.food_item_id]
-                );
-                const nextCanonicalKey = conflictingFoodItem ? currentFoodItem.canonical_key : canonicalKey;
-                await run(
-                    `UPDATE food_items
-                     SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
-                     WHERE id = ?`,
-                    [validation.value.name, nextCanonicalKey, validation.value.calories_per_100g, existing.food_item_id]
-                );
-                foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
+                foodItem = await renameFoodItemStable(existing.food_item_id, validation.value.name, {
+                    calories_per_100g: validation.value.calories_per_100g,
+                    updateCanonical: true
+                });
             } else {
                 foodItem = await getOrCreateFoodItem(validation.value.name, {
                     calories_per_100g: validation.value.calories_per_100g
@@ -3385,10 +3445,7 @@ app.put("/admin/food-items/:id", async (req, res) => {
         if (calories !== null && (!Number.isFinite(calories) || calories < 0)) return res.status(400).json({ error: "kcal / 100 g ist ungültig." });
         const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
         if (!item) return res.status(404).json({ error: "Lebensmittel-Stammsatz wurde nicht gefunden." });
-        const canonicalKey = buildFoodIdentity(displayName).canonical_key || normalizeText(displayName);
-        const conflicting = await get(`SELECT id, display_name FROM food_items WHERE canonical_key = ? AND id <> ?`, [canonicalKey, id]);
-        if (conflicting) return res.status(409).json({ error: `Der interne Schlüssel wird bereits von „${conflicting.display_name}“ genutzt. Bitte ggf. über Zusammenführen konsolidieren.` });
-        await run(`UPDATE food_items SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [displayName, canonicalKey, calories, id]);
+        await renameFoodItemStable(id, displayName, { calories_per_100g: calories, updateCanonical: true });
         await replaceFoodItemHealthFactors(id, req.body?.health_factor_ids || []);
         res.json({ success: true, detail: await getFoodItemAdminDetail(id), table: await getAdminTablePreview("food_items") });
     } catch (error) {
@@ -3516,7 +3573,7 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [])
             if (firstDuplicateInventory) {
                 await run(
                     `UPDATE inventory_items
-                     SET food_item_id = ?, canonical_name = ?, name = COALESCE(NULLIF(name, ''), ?), updated_at = CURRENT_TIMESTAMP
+                     SET food_item_id = ?, canonical_name = ?, name = ?, updated_at = CURRENT_TIMESTAMP
                      WHERE id = ?`,
                     [masterId, master.canonical_key || "", master.display_name || firstDuplicateInventory.name || "", firstDuplicateInventory.id]
                 );
@@ -3548,9 +3605,9 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [])
                 } else {
                     await run(
                         `UPDATE inventory_items
-                         SET food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+                         SET food_item_id = ?, canonical_name = ?, name = ?, updated_at = CURRENT_TIMESTAMP
                          WHERE id = ?`,
-                        [masterId, master.canonical_key || "", inv.id]
+                        [masterId, master.canonical_key || "", master.display_name || inv.name || "", inv.id]
                     );
                     masterInventory = await get(`SELECT * FROM inventory_items WHERE id = ?`, [inv.id]);
                 }
@@ -3560,6 +3617,13 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [])
             await run(`DELETE FROM food_items WHERE id = ?`, [duplicate.id]);
             merged.push({ id: duplicate.id, display_name: duplicate.display_name, canonical_key: duplicate.canonical_key });
         }
+
+        await run(
+            `UPDATE inventory_items
+             SET name = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE food_item_id = ?`,
+            [master.display_name || "", master.canonical_key || "", masterId]
+        );
 
         await run("COMMIT");
         return {
