@@ -2272,26 +2272,70 @@ app.get("/recipes/by-ingredient/:name", async (req, res) => {
         const ingredientName = normalizeIngredientText(req.params.name || "");
         if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
 
-        const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
-        const matches = [];
+        const matchesByRecipeId = new Map();
+        const resolvedFoodItem = await findFoodItemByName(ingredientName);
 
+        // Wichtig: Inventar → Rezepte darf nicht erneut nur aus Freitext parsen.
+        // Wenn ein food_item existiert, sind recipe_ingredients.food_item_id die führende Wahrheit.
+        // Genau das behebt Fälle wie "Cheddar": food_items kennt die Rezeptverknüpfung,
+        // aber die alte Freitextsuche hat sie in der Inventaransicht nicht gefunden.
+        if (resolvedFoodItem?.id) {
+            const linkedRows = await all(`
+                SELECT r.*, ri.raw_text, ri.food_name, ri.amount, ri.unit, ri.sort_order, ri.food_item_id,
+                       fi.display_name AS linked_food_name
+                FROM recipe_ingredients ri
+                JOIN recipes r ON r.id = ri.recipe_id
+                LEFT JOIN food_items fi ON fi.id = ri.food_item_id
+                WHERE ri.food_item_id = ?
+                ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC
+            `, [resolvedFoodItem.id]);
+
+            for (const row of linkedRows) {
+                if (!matchesByRecipeId.has(row.id)) {
+                    matchesByRecipeId.set(row.id, {
+                        ...normalizeRecipeRow(row),
+                        matched_ingredients: []
+                    });
+                }
+                matchesByRecipeId.get(row.id).matched_ingredients.push({
+                    raw_text: row.raw_text || "",
+                    food_name: row.linked_food_name || row.food_name || resolvedFoodItem.display_name || ingredientName,
+                    amount: row.amount,
+                    unit: row.unit,
+                    food_item_id: row.food_item_id || resolvedFoodItem.id
+                });
+            }
+        }
+
+        // Fallback nur für ältere / noch nicht verknüpfte Rezeptzeilen.
+        // Dabei keine bereits per food_item_id gefundenen Rezepte doppelt einfügen.
+        const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
         for (const recipe of recipes) {
+            if (matchesByRecipeId.has(recipe.id)) continue;
             const parsed = parseIngredientsText(recipe.ingredients || "");
             const matchedIngredients = parsed.filter(ingredient => ingredientMatchesName(ingredient.food_name, ingredientName));
             if (matchedIngredients.length) {
-                matches.push({
+                matchesByRecipeId.set(recipe.id, {
                     ...normalizeRecipeRow(recipe),
                     matched_ingredients: matchedIngredients.map(ingredient => ({
                         raw_text: ingredient.raw_text,
                         food_name: ingredient.food_name,
                         amount: ingredient.amount,
-                        unit: ingredient.unit
+                        unit: ingredient.unit,
+                        food_item_id: resolvedFoodItem?.id || null
                     }))
                 });
             }
         }
 
-        res.json({ ingredient: ingredientName, recipes: matches });
+        const matches = Array.from(matchesByRecipeId.values())
+            .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "de"));
+
+        res.json({
+            ingredient: ingredientName,
+            food_item: resolvedFoodItem ? normalizeFoodItemRow(resolvedFoodItem) : null,
+            recipes: matches
+        });
     } catch (error) {
         console.error("Fehler bei GET /recipes/by-ingredient/:name:", error.message);
         res.status(500).json({ error: "Rezepte zur Zutat konnten nicht geladen werden" });
