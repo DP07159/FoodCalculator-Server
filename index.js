@@ -46,32 +46,6 @@ function all(sql, params = []) {
     });
 }
 
-let activeTransactionDepth = 0;
-
-async function withTransaction(callback) {
-    if (activeTransactionDepth > 0) {
-        activeTransactionDepth += 1;
-        try {
-            return await callback();
-        } finally {
-            activeTransactionDepth -= 1;
-        }
-    }
-
-    activeTransactionDepth = 1;
-    await run("BEGIN");
-    try {
-        const result = await callback();
-        await run("COMMIT");
-        return result;
-    } catch (error) {
-        await run("ROLLBACK");
-        throw error;
-    } finally {
-        activeTransactionDepth = 0;
-    }
-}
-
 async function addColumnIfMissing(tableName, columnName, definition) {
     const columns = await all(`PRAGMA table_info(${tableName})`);
     const existingColumns = columns.map(column => column.name);
@@ -2163,197 +2137,106 @@ async function buildRecipeIngredientRebuildPlan() {
 }
 
 async function applyRecipeIngredientRebuild(options = {}) {
+    const recipes = await all(`SELECT * FROM recipes ORDER BY id ASC`);
+    let createdItems = 0;
+    let linkedIngredients = 0;
+    let preservedIngredients = 0;
+    let deletedItems = [];
     const deleteAllZeroStock = Boolean(options.deleteAllZeroStock);
 
-    return withTransaction(async () => {
-        const recipes = await all(`SELECT * FROM recipes ORDER BY id ASC`);
-        const existingLinks = await all(`SELECT * FROM recipe_ingredients ORDER BY recipe_id ASC, sort_order ASC, id ASC`);
-        const existingByExactLine = new Map();
-        const existingByRecipeOrderCanonical = new Map();
-
-        for (const link of existingLinks) {
-            const rawKey = normalizeGermanText(link.raw_text || "");
-            const canonicalKey = link.canonical_key || buildFoodIdentity(link.food_name || link.raw_text || "").canonical_key || "";
-            const exactKey = `${link.recipe_id}|${link.sort_order}|${rawKey}`;
-            if (!existingByExactLine.has(exactKey)) existingByExactLine.set(exactKey, link);
-            const canonicalLineKey = `${link.recipe_id}|${link.sort_order}|${canonicalKey}`;
-            if (canonicalKey && !existingByRecipeOrderCanonical.has(canonicalLineKey)) existingByRecipeOrderCanonical.set(canonicalLineKey, link);
+    await run("BEGIN");
+    try {
+        const previousLinksByRecipe = new Map();
+        const previousLinks = await all(
+            `SELECT sort_order, raw_text, food_name, canonical_key, food_item_id, link_source, recipe_id
+             FROM recipe_ingredients
+             ORDER BY recipe_id ASC, sort_order ASC`
+        );
+        for (const link of previousLinks) {
+            if (!previousLinksByRecipe.has(Number(link.recipe_id))) previousLinksByRecipe.set(Number(link.recipe_id), []);
+            previousLinksByRecipe.get(Number(link.recipe_id)).push(link);
         }
 
-        let createdItems = 0;
-        let renamedItems = 0;
-        let linkedIngredients = 0;
-        const deletedItems = [];
+        const overrides = await getRecipeResyncOverrides();
+        const overrideMaps = buildRecipeResyncOverrideMaps(overrides);
         const usedInventoryIds = new Set();
         const usedFoodItemIds = new Set();
 
-        const inventoryItems = await getAllInventoryItemsWithBatches();
-        const overrides = await getRecipeResyncOverrides();
-        const overrideMaps = buildRecipeResyncOverrideMaps(overrides);
-        const targetInventoryByCanonical = new Map();
-        const targetFoodByCanonical = new Map();
-
-        const findExistingLinkForIngredient = (recipeId, index, ingredient, canonicalKey) => {
-            const exactKey = `${recipeId}|${index}|${normalizeGermanText(ingredient.raw_text || "")}`;
-            const exact = existingByExactLine.get(exactKey);
-            if (exact?.food_item_id) return exact;
-            if (canonicalKey) {
-                const canonicalLineKey = `${recipeId}|${index}|${canonicalKey}`;
-                const byCanonical = existingByRecipeOrderCanonical.get(canonicalLineKey);
-                if (byCanonical?.food_item_id) return byCanonical;
-            }
-            return null;
-        };
-
-        const resolveTargetForCanonical = async (ingredient, canonicalKey) => {
-            if (!canonicalKey) return { item: null, foodItem: null };
-            if (targetFoodByCanonical.has(canonicalKey)) {
-                return {
-                    item: targetInventoryByCanonical.get(canonicalKey) || null,
-                    foodItem: targetFoodByCanonical.get(canonicalKey) || null
-                };
-            }
-            if (overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) return { item: null, foodItem: null, ignored: true };
-
-            let item = null;
-            let foodItem = null;
-            const overrideTargetId = overrideMaps.linkByCanonical.get(canonicalKey);
-            if (overrideTargetId) item = inventoryItems.find(candidate => Number(candidate.id) === Number(overrideTargetId)) || null;
-            if (!item) item = chooseInventoryItemForParsedTarget(ingredient, inventoryItems, usedInventoryIds);
-
-            if (item) {
-                usedInventoryIds.add(Number(item.id));
-                if (item.food_item_id) foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]);
-                if (!foodItem) foodItem = await getOrCreateFoodItem(item.name || ingredient.food_name, { aliasName: item.recipe_match_name || item.name });
-
-                await addFoodAlias(foodItem.id, item.name);
-                await addFoodAlias(foodItem.id, item.recipe_match_name || item.name);
-                await addFoodAlias(foodItem.id, ingredient.raw_text);
-                await addFoodAlias(foodItem.id, ingredient.food_name);
-
-                const isExplicitOverride = Boolean(overrideTargetId);
-                const shouldRename = !isExplicitOverride && isRecipeGeneratedWithoutStock(item) && normalizeGermanText(item.name) !== normalizeGermanText(ingredient.food_name);
-                await run(
-                    `UPDATE inventory_items
-                     SET name = ?,
-                         recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
-                         canonical_name = ?,
-                         food_item_id = ?,
-                         unit = COALESCE(NULLIF(unit, ''), ?),
-                         updated_at = CURRENT_TIMESTAMP
-                     WHERE id = ?`,
-                    [shouldRename ? ingredient.food_name : item.name, ingredient.food_name, foodItem.canonical_key, foodItem.id, ingredient.unit || "g", item.id]
-                );
-                if (shouldRename) renamedItems += 1;
-                item = { ...item, name: shouldRename ? ingredient.food_name : item.name, canonical_name: foodItem.canonical_key, food_item_id: foodItem.id };
-            } else {
-                // Vor jeder Neuanlage strikt gegen bestehende Stammdaten/Aliase prüfen.
-                foodItem = await findFoodItemByName(ingredient.food_name || ingredient.raw_text);
-                if (foodItem) {
-                    const existingInventory = inventoryItems.find(candidate => Number(candidate.food_item_id) === Number(foodItem.id)) || null;
-                    if (existingInventory) {
-                        item = existingInventory;
-                        usedInventoryIds.add(Number(item.id));
-                    }
-                }
-            }
-
-            if (!foodItem) {
-                foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
-                createdItems += 1;
-            }
-
-            if (!item) {
-                const existingInventory = inventoryItems.find(candidate => Number(candidate.food_item_id) === Number(foodItem.id)) || null;
-                if (existingInventory) {
-                    item = existingInventory;
-                    usedInventoryIds.add(Number(item.id));
-                } else {
-                    const result = await run(
-                        `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
-                         VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?, ?, ?, ?)`,
-                        [foodItem.display_name || ingredient.food_name, ingredient.unit || "g", ingredient.food_name, foodItem.calories_per_100g ?? null, foodItem.id, foodItem.canonical_key]
-                    );
-                    const inserted = await get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
-                    item = normalizeInventoryRow(inserted, []);
-                    inventoryItems.push(item);
-                    usedInventoryIds.add(Number(item.id));
-                }
-            }
-
-            await addFoodAlias(foodItem.id, ingredient.raw_text);
-            await addFoodAlias(foodItem.id, ingredient.food_name);
-            targetInventoryByCanonical.set(canonicalKey, item);
-            targetFoodByCanonical.set(canonicalKey, foodItem);
-            usedFoodItemIds.add(Number(foodItem.id));
-            return { item, foodItem };
-        };
-
-        await run(`DELETE FROM recipe_ingredients`);
-
         for (const recipe of recipes) {
             const parsed = parseIngredientsText(recipe.ingredients || "");
+            const previousRecipeLinks = previousLinksByRecipe.get(Number(recipe.id)) || [];
+
+            await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipe.id]);
+
             for (const [index, ingredient] of parsed.entries()) {
                 const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
                 if (canonicalKey && overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
 
                 let foodItem = null;
-                let item = null;
-                const existingLink = findExistingLinkForIngredient(recipe.id, index, ingredient, canonicalKey);
-                if (existingLink?.food_item_id) {
-                    foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existingLink.food_item_id]);
-                    if (foodItem) {
-                        item = inventoryItems.find(candidate => Number(candidate.food_item_id) === Number(foodItem.id)) || null;
-                        usedFoodItemIds.add(Number(foodItem.id));
-                        if (item) usedInventoryIds.add(Number(item.id));
+                let linkSource = "rebuilt";
+
+                // Wichtigster Schutz: bestehende, einmal gesetzte Verknüpfungen bleiben erhalten.
+                // Die Admin-Synchronisierung darf sie nicht durch neue Parse-Entscheidungen überschreiben.
+                const preserved = await getPreservedFoodItemForIngredient(previousRecipeLinks, index, ingredient);
+                if (preserved?.foodItem) {
+                    foodItem = preserved.foodItem;
+                    linkSource = preserved.linkSource || "preserved_resync";
+                    preservedIngredients += 1;
+                }
+
+                // Admin-Override: nur wenn keine bestehende Verknüpfung erhalten werden konnte.
+                if (!foodItem && canonicalKey) {
+                    const overrideTargetId = overrideMaps.linkByCanonical.get(canonicalKey);
+                    if (overrideTargetId) {
+                        const targetItem = await get(`SELECT * FROM inventory_items WHERE id = ?`, [overrideTargetId]);
+                        if (targetItem?.food_item_id) {
+                            foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [targetItem.food_item_id]);
+                            if (foodItem) linkSource = "admin_override";
+                        }
                     }
                 }
 
+                // Sicherer automatischer Fallback: nur exakter Food-Item-/Alias-Treffer.
                 if (!foodItem) {
-                    const resolved = await resolveTargetForCanonical(ingredient, canonicalKey);
-                    if (resolved.ignored) continue;
-                    item = resolved.item;
-                    foodItem = resolved.foodItem;
+                    foodItem = await findFoodItemByName(ingredient.food_name);
+                    if (foodItem) linkSource = "auto_exact";
                 }
 
+                // Erst wenn wirklich kein bestehender Artikel/Alias/Preserve-Treffer existiert, neu anlegen.
                 if (!foodItem) {
-                    foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    linkSource = "new_from_resync";
                     createdItems += 1;
-                    usedFoodItemIds.add(Number(foodItem.id));
-                }
-
-                if (!item) {
-                    item = inventoryItems.find(candidate => Number(candidate.food_item_id) === Number(foodItem.id)) || null;
-                    if (item) usedInventoryIds.add(Number(item.id));
                 }
 
                 await addFoodAlias(foodItem.id, ingredient.raw_text);
                 await addFoodAlias(foodItem.id, ingredient.food_name);
+                await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "admin_override" ? "manual" : "recipe" });
+
+                const inventoryItem = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [foodItem.id]);
+                if (inventoryItem?.id) usedInventoryIds.add(Number(inventoryItem.id));
+                usedFoodItemIds.add(Number(foodItem.id));
+
                 await run(
                     `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key, link_source)
                      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
-                    [
-                        recipe.id,
-                        ingredient.raw_text,
-                        ingredient.food_name,
-                        ingredient.amount,
-                        ingredient.unit,
-                        index,
-                        foodItem.id,
-                        foodItem.canonical_key,
-                        existingLink?.food_item_id ? "preserved" : "rebuilt"
-                    ]
+                    [recipe.id, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key, linkSource]
                 );
                 linkedIngredients += 1;
             }
         }
 
+        // Nach dem Neuaufbau dürfen nur ungenutzte, bestandslose Altlasten entfernt werden.
+        // Alles, was aktuell über recipe_ingredients.food_item_id verknüpft ist, bleibt geschützt.
+        const linkedFoodRows = await all(`SELECT DISTINCT food_item_id FROM recipe_ingredients WHERE food_item_id IS NOT NULL`);
+        for (const row of linkedFoodRows) usedFoodItemIds.add(Number(row.food_item_id));
+
         const currentInventoryItems = await getAllInventoryItemsWithBatches();
         const deleteCandidates = currentInventoryItems.filter(item => {
             if (usedInventoryIds.has(Number(item.id))) return false;
             if (item.food_item_id && usedFoodItemIds.has(Number(item.food_item_id))) return false;
-            if (overrideMaps.ignoreDeleteByInventoryId.has(Number(item.id))) return false;
-            if (deleteAllZeroStock) return getInventoryStockTotal(item) <= 0;
+            if (getInventoryStockTotal(item) > 0) return false;
+            if (deleteAllZeroStock) return true;
             return isRecipeGeneratedWithoutStock(item);
         });
 
@@ -2363,8 +2246,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
                 const targetItem = currentInventoryItems.find(candidate => Number(candidate.id) === Number(targetOverrideId));
                 if (targetItem) {
                     if (targetItem.food_item_id && item.food_item_id && Number(targetItem.food_item_id) !== Number(item.food_item_id)) {
-                        await consolidateFoodItems(targetItem.food_item_id, [item.food_item_id], { manageTransaction: false });
-                        usedFoodItemIds.add(Number(targetItem.food_item_id));
+                        await consolidateFoodItems(targetItem.food_item_id, [item.food_item_id]);
                     }
                     if (targetItem.food_item_id) {
                         await addFoodAlias(targetItem.food_item_id, item.name);
@@ -2376,12 +2258,1132 @@ async function applyRecipeIngredientRebuild(options = {}) {
             await run(`DELETE FROM admin_ignored_duplicate_pairs WHERE item_id_a = ? OR item_id_b = ?`, [item.id, item.id]);
             await run(`DELETE FROM inventory_items WHERE id = ?`, [item.id]);
             deletedItems.push({ id: item.id, name: item.name, linked_to_inventory_item_id: targetOverrideId || null });
-            if (item.food_item_id && !usedFoodItemIds.has(Number(item.food_item_id))) await removeFoodItemIfUnused(item.food_item_id);
+            if (item.food_item_id) await removeFoodItemIfUnused(item.food_item_id);
         }
 
-        return { created_items: createdItems, renamed_items: renamedItems, linked_ingredients: linkedIngredients, deleted_items: deletedItems };
-    });
+        await run("COMMIT");
+        return {
+            created_items: createdItems,
+            linked_ingredients: linkedIngredients,
+            preserved_ingredients: preservedIngredients,
+            deleted_items: deletedItems
+        };
+    } catch (error) {
+        await run("ROLLBACK");
+        throw error;
+    }
 }
+
+async function buildInventoryCleanupPreview() {
+    const inventoryItems = await getAllInventoryItemsWithBatches();
+    const recipeIngredientRows = await all(`
+        SELECT ri.*, r.name AS recipe_name
+        FROM recipe_ingredients ri
+        LEFT JOIN recipes r ON r.id = ri.recipe_id
+        ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC
+    `);
+    const ignoredPairs = await all(`SELECT * FROM admin_ignored_duplicate_pairs`);
+    const ignoredPairKeys = new Set(ignoredPairs.map(row => `${row.item_id_a}:${row.item_id_b}`));
+
+    const recipeUsageByCanonical = new Map();
+    for (const row of recipeIngredientRows) {
+        const canonical = row.canonical_key || buildFoodIdentity(row.food_name || row.raw_text).canonical_key || "";
+        if (!canonical) continue;
+        if (!recipeUsageByCanonical.has(canonical)) recipeUsageByCanonical.set(canonical, []);
+        recipeUsageByCanonical.get(canonical).push({
+            recipe_id: row.recipe_id,
+            recipe_name: row.recipe_name || "Unbenanntes Rezept",
+            raw_text: row.raw_text || "",
+            food_name: row.food_name || ""
+        });
+    }
+
+    const enrichedItems = inventoryItems.map(item => {
+        const canonical = item.canonical_name || buildFoodIdentity(item.name).canonical_key || "";
+        const stockTotal = getInventoryStockTotal(item);
+        const usedInRecipes = recipeUsageByCanonical.get(canonical) || [];
+        const source = String(item.source || "manual");
+        const protectionReasons = [];
+        if (stockTotal > 0) protectionReasons.push("Bestand vorhanden");
+        if (source !== "recipe") protectionReasons.push("manuell gepflegt");
+        if (usedInRecipes.length > 0) protectionReasons.push("in Rezepten verwendet");
+        return {
+            id: item.id,
+            name: item.name,
+            canonical_name: canonical,
+            source,
+            stock_total: stockTotal,
+            has_stock: stockTotal > 0,
+            used_in_recipes: usedInRecipes,
+            is_protected: protectionReasons.length > 0,
+            protection_reasons: protectionReasons.length ? protectionReasons : ["automatisch erzeugt, ohne aktiven Schutz"],
+            calories_per_100g: item.calories_per_100g === null || item.calories_per_100g === undefined ? null : Number(item.calories_per_100g)
+        };
+    });
+
+    const groups = new Map();
+    for (const item of enrichedItems) {
+        const key = item.canonical_name || buildFoodIdentity(item.name).canonical_key || item.name;
+        if (!key) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+    }
+
+    const possibleDuplicates = Array.from(groups.entries())
+        .filter(([, items]) => items.length > 1)
+        .map(([canonical_key, items]) => {
+            const activeItems = items.filter(item => true);
+            const pair = activeItems.length === 2 ? normalizeDuplicatePairIds(activeItems[0].id, activeItems[1].id) : null;
+            const isIgnored = Boolean(pair && ignoredPairKeys.has(`${pair[0]}:${pair[1]}`));
+            const preferred = [...activeItems].sort((a, b) => {
+                if (a.has_stock !== b.has_stock) return a.has_stock ? -1 : 1;
+                if (a.source !== b.source) return a.source === "manual" ? -1 : 1;
+                return String(a.name || "").length - String(b.name || "").length;
+            })[0];
+            const deleteCandidates = activeItems.filter(item => Number(item.id) !== Number(preferred.id));
+            return {
+                canonical_key,
+                ignored: isIgnored,
+                suggested_master: preferred,
+                suggested_delete_candidates: deleteCandidates,
+                candidates: activeItems,
+                reason: "Gleicher normalisierter Lebensmittel-Schlüssel. Bitte fachlich prüfen, ob beide wirklich denselben Artikel meinen."
+            };
+        })
+        .filter(group => !group.ignored);
+
+    const orphanRecipeItems = enrichedItems.filter(item =>
+        item.source === "recipe" && !item.has_stock && item.used_in_recipes.length === 0
+    );
+
+    const protectedItems = enrichedItems.filter(item => item.is_protected);
+
+    return {
+        generated_at: new Date().toISOString(),
+        counts: {
+            inventory_items: enrichedItems.length,
+            possible_duplicates: possibleDuplicates.length,
+            orphan_recipe_items: orphanRecipeItems.length,
+            protected_items: protectedItems.length
+        },
+        inventory_items: enrichedItems,
+        possible_duplicates: possibleDuplicates,
+        orphan_recipe_items: orphanRecipeItems,
+        protected_items: protectedItems,
+        ignored_duplicate_pairs: ignoredPairs
+    };
+}
+
+
+
+app.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
+    try {
+        const foodItemId = Number.parseInt(req.params.foodItemId, 10);
+        if (!Number.isInteger(foodItemId) || foodItemId <= 0) {
+            return res.status(400).json({ error: "Gültige food_item_id ist erforderlich." });
+        }
+
+        const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
+        if (!foodItem) return res.status(404).json({ error: "Lebensmittel-Stammsatz nicht gefunden." });
+
+        const rows = await all(`
+            SELECT
+                r.*,
+                ri.id AS ingredient_link_id,
+                ri.raw_text AS ingredient_raw_text,
+                ri.food_name AS ingredient_food_name,
+                ri.amount AS ingredient_amount,
+                ri.unit AS ingredient_unit,
+                ri.sort_order AS ingredient_sort_order
+            FROM recipe_ingredients ri
+            INNER JOIN recipes r ON r.id = ri.recipe_id
+            WHERE ri.food_item_id = ?
+            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+        `, [foodItemId]);
+
+        const recipeMap = new Map();
+        for (const row of rows) {
+            if (!recipeMap.has(row.id)) {
+                recipeMap.set(row.id, {
+                    ...normalizeRecipeRow(row),
+                    matched_ingredients: []
+                });
+            }
+            recipeMap.get(row.id).matched_ingredients.push({
+                id: row.ingredient_link_id,
+                raw_text: row.ingredient_raw_text || row.ingredient_food_name || "",
+                food_name: row.ingredient_food_name || foodItem.display_name || "",
+                amount: row.ingredient_amount,
+                unit: row.ingredient_unit || ""
+            });
+        }
+
+        res.json({
+            food_item_id: foodItemId,
+            food_item: normalizeFoodItemRow(foodItem),
+            recipes: Array.from(recipeMap.values())
+        });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/by-food-item/:foodItemId:", error.message);
+        res.status(500).json({ error: "Rezepte zum Lebensmittel konnten nicht geladen werden" });
+    }
+});
+
+app.get("/recipes/by-ingredient/:name", async (req, res) => {
+    try {
+        const ingredientName = normalizeIngredientText(req.params.name || "");
+        if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
+
+        const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
+        const matches = [];
+
+        for (const recipe of recipes) {
+            const parsed = parseIngredientsText(recipe.ingredients || "");
+            const matchedIngredients = parsed.filter(ingredient => ingredientMatchesName(ingredient.food_name, ingredientName));
+            if (matchedIngredients.length) {
+                matches.push({
+                    ...normalizeRecipeRow(recipe),
+                    matched_ingredients: matchedIngredients.map(ingredient => ({
+                        raw_text: ingredient.raw_text,
+                        food_name: ingredient.food_name,
+                        amount: ingredient.amount,
+                        unit: ingredient.unit
+                    }))
+                });
+            }
+        }
+
+        res.json({ ingredient: ingredientName, recipes: matches });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/by-ingredient/:name:", error.message);
+        res.status(500).json({ error: "Rezepte zur Zutat konnten nicht geladen werden" });
+    }
+});
+
+function scoreInventoryIngredientMatch(item, ingredientName) {
+    const ingredientKey = buildFoodIdentity(ingredientName).canonical_key;
+    const itemKey = item?.canonical_name || buildFoodIdentity(item?.name).canonical_key;
+
+    // Nur exakte interne Identität oder exakter sichtbarer Name darf automatisch treffen.
+    // Keine Teilstring-/Token-Matches mehr: "Salz" darf NICHT "gesalzen" treffen,
+    // "Eier" darf NICHT "Eierstich" treffen.
+    if (ingredientKey && itemKey && ingredientKey === itemKey) return 100;
+
+    const ingredientComparable = normalizeGermanText(ingredientName)
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const candidateNames = [item?.name, item?.recipe_match_name].filter(Boolean);
+    for (const candidate of candidateNames) {
+        const candidateComparable = normalizeGermanText(candidate)
+            .replace(/[^a-z0-9\s-]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        if (candidateComparable && ingredientComparable && candidateComparable === ingredientComparable) return 100;
+    }
+
+    return 0;
+}
+
+app.get("/inventory/by-ingredient/:name", async (req, res) => {
+    try {
+        const ingredientName = normalizeIngredientText(req.params.name || "");
+        if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
+
+        const inventoryItems = await getAllInventoryItemsWithBatches();
+        const rankedItems = inventoryItems
+            .map(item => ({ item, score: scoreInventoryIngredientMatch(item, ingredientName) }))
+            .filter(entry => entry.score >= 70)
+            .sort((a, b) => b.score - a.score || String(a.item.name || "").localeCompare(String(b.item.name || ""), "de"));
+
+        if (!rankedItems.length) return res.status(404).json({ error: "Kein passender Inventarartikel gefunden." });
+        res.json(rankedItems[0].item);
+    } catch (error) {
+        console.error("Fehler bei GET /inventory/by-ingredient/:name:", error.message);
+        res.status(500).json({ error: "Inventarartikel zur Zutat konnte nicht geladen werden" });
+    }
+});
+
+app.get("/recipes/:id/stock-check", async (req, res) => {
+    try {
+        const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
+        if (!recipe) return res.status(404).json({ error: "Rezept nicht gefunden" });
+
+        const requestedPortions = Number.parseInt(req.query.portions, 10);
+        const basePortions = Number.parseInt(recipe.portions, 10) > 0 ? Number.parseInt(recipe.portions, 10) : 1;
+        const displayedPortions = Number.isInteger(requestedPortions) && requestedPortions > 0 ? requestedPortions : basePortions;
+        const factor = displayedPortions / basePortions;
+
+        const inventoryItems = await getAllInventoryItemsWithBatches();
+
+        const linkedIngredients = await all(
+            `SELECT
+                ri.raw_text,
+                ri.food_name,
+                ri.amount,
+                ri.unit,
+                ri.sort_order,
+                ri.food_item_id,
+                fi.display_name AS food_display_name
+             FROM recipe_ingredients ri
+             LEFT JOIN food_items fi ON fi.id = ri.food_item_id
+             WHERE ri.recipe_id = ?
+             ORDER BY ri.sort_order ASC`,
+            [req.params.id]
+        );
+
+        const parsedIngredients = linkedIngredients.length
+            ? linkedIngredients.map(row => ({
+                raw_text: row.raw_text || "",
+                food_name: row.food_display_name || row.food_name || "",
+                amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+                unit: row.unit || "",
+                original_unit: row.unit || "",
+                food_item_id: row.food_item_id || null
+            }))
+            : parseIngredientsText(recipe.ingredients || "");
+
+        const entries = parsedIngredients.map(ingredient => buildRecipeStockEntry(ingredient, inventoryItems, factor));
+
+        const summary = entries.reduce((result, entry) => {
+            if (entry.status === "available") result.available += 1;
+            if (entry.status === "partial") result.partial += 1;
+            if (entry.status === "missing") result.missing += 1;
+            return result;
+        }, { available: 0, partial: 0, missing: 0 });
+
+        res.json({
+            recipe_id: Number(recipe.id),
+            base_portions: basePortions,
+            displayed_portions: displayedPortions,
+            ingredients: entries,
+            summary
+        });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/:id/stock-check:", error.message);
+        res.status(500).json({ error: "Bestandsprüfung konnte nicht geladen werden" });
+    }
+});
+
+app.get("/inventory/suggestions", async (req, res) => {
+    try {
+        const q = normalizeName(req.query.q || "");
+        const qIdentity = buildFoodIdentity(q);
+        const rows = await all(`
+            SELECT DISTINCT
+                ii.id,
+                COALESCE(NULLIF(fi.display_name, ''), ii.name) AS name,
+                ii.name AS inventory_name,
+                ii.unit,
+                COALESCE(fi.calories_per_100g, ii.calories_per_100g) AS calories_per_100g,
+                COALESCE(NULLIF(fi.canonical_key, ''), ii.canonical_name) AS canonical_name
+            FROM inventory_items ii
+            LEFT JOIN food_items fi ON fi.id = ii.food_item_id
+            LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+            ORDER BY COALESCE(NULLIF(fi.display_name, ''), ii.name) COLLATE NOCASE ASC
+        `);
+        const filtered = rows.filter(row => {
+            if (!q) return true;
+            const haystack = [row.name, row.inventory_name, row.canonical_name].join(" ").toLowerCase();
+            if (haystack.includes(q.toLowerCase())) return true;
+            if (qIdentity.canonical_key && row.canonical_name === qIdentity.canonical_key) return true;
+            return comparableNamesMatch(row.name, q);
+        }).slice(0, 10);
+        res.json(filtered);
+    } catch (error) {
+        console.error("Fehler bei GET /inventory/suggestions:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden der Vorschläge" });
+    }
+});
+
+app.get("/food-items/resolve", async (req, res) => {
+    try {
+        const originalQuery = String(req.query.q || "").trim();
+        const parsed = parseIngredientLine(originalQuery);
+        const lookupText = normalizeName(parsed?.food_name || originalQuery);
+        if (!lookupText) return res.json({ query: originalQuery, lookup: lookupText, identity: null, exact: null, suggestions: [] });
+        const identity = buildFoodIdentity(lookupText);
+        const exactFoodItem = await findFoodItemByName(lookupText);
+        const suggestions = await all(`
+            SELECT fi.id, fi.display_name, fi.canonical_key, fi.calories_per_100g
+            FROM food_items fi
+            ORDER BY fi.display_name COLLATE NOCASE ASC
+        `);
+        const ranked = suggestions
+            .map(item => {
+                const displayComparable = normalizeGermanText(item.display_name)
+                    .replace(/[^a-z0-9\s-]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                const lookupComparable = normalizeGermanText(lookupText)
+                    .replace(/[^a-z0-9\s-]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                return {
+                    ...item,
+                    score: item.canonical_key === identity.canonical_key || displayComparable === lookupComparable ? 100 : 0
+                };
+            })
+            .filter(item => item.score >= 100)
+            .sort((a, b) => a.display_name.localeCompare(b.display_name, "de"))
+            .slice(0, 5);
+        res.json({ query: originalQuery, lookup: lookupText, identity, exact: normalizeFoodItemRow(exactFoodItem), suggestions: ranked });
+    } catch (error) {
+        console.error("Fehler bei GET /food-items/resolve:", error.message);
+        res.status(500).json({ error: "Lebensmittel konnte nicht geprüft werden" });
+    }
+});
+
+app.get("/inventory", async (req, res) => {
+    try {
+        const enriched = await getAllInventoryItemsWithBatches();
+        res.json(enriched);
+    } catch (error) {
+        console.error("Fehler bei GET /inventory:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Inventars" });
+    }
+});
+
+app.get("/inventory/:id", async (req, res) => {
+    try {
+        const row = await get(`
+            SELECT
+                ii.*,
+                fi.display_name AS food_display_name,
+                fi.canonical_key AS food_canonical_key,
+                fi.calories_per_100g AS food_calories_per_100g
+            FROM inventory_items ii
+            LEFT JOIN food_items fi ON fi.id = ii.food_item_id
+            WHERE ii.id = ?
+        `, [req.params.id]);
+        if (!row) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        const batches = await getInventoryBatches(row.id);
+        res.json(normalizeInventoryRow(row, batches));
+    } catch (error) {
+        console.error("Fehler bei GET /inventory/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Laden des Inventar-Eintrags" });
+    }
+});
+
+app.post("/inventory", async (req, res) => {
+    try {
+        const validation = validateInventoryPayload(req.body);
+        if (validation.error) return res.status(400).json({ error: validation.error });
+        const item = await getOrCreateInventoryItem(validation.value);
+        const stockType = req.body?.stockType === "loose" ? "loose" : "package";
+        const common = {
+            expiry_date: typeof req.body.expiry_date === "string" ? req.body.expiry_date : "",
+            storage_location: typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "",
+            notes: typeof req.body.notes === "string" ? req.body.notes.trim() : ""
+        };
+        if (stockType === "package") {
+            await createInventoryPackageUnits(item.id, { count: req.body.packageCount, unitLabel: req.body.unitLabel, unitWeight: req.body.unitWeight, measureUnit: req.body.measureUnit, ...common });
+        } else {
+            await createInventoryLooseAmount(item.id, { amount: req.body.looseAmount, measureUnit: req.body.measureUnit, ...common });
+        }
+        const updated = await getInventoryItemWithFoodName(item.id);
+        const batches = await getInventoryBatches(item.id);
+        res.status(201).json(normalizeInventoryRow(updated, batches));
+    } catch (error) {
+        console.error("Fehler bei POST /inventory:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Speichern des Inventar-Eintrags" });
+    }
+});
+
+app.put("/inventory/:id", async (req, res) => {
+    try {
+        const validation = validateInventoryPayload(req.body);
+        if (validation.error) return res.status(400).json({ error: validation.error });
+
+        const existing = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!existing) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const identity = buildFoodIdentity(validation.value.name);
+        const canonicalKey = identity.canonical_key || canonicalizeIngredientName(validation.value.name);
+        if (!canonicalKey) return res.status(400).json({ error: "Lebensmittel konnte nicht normalisiert werden." });
+
+        let foodItem = null;
+
+        if (existing.food_item_id) {
+            // Eine Umbenennung im Inventar ist eine reine Pflege des bestehenden Stammdatensatzes.
+            // Sie darf niemals auf einen anderen food_item wechseln, sonst verlieren Rezepte/Aliase ihre Zuordnung.
+            const currentFoodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
+            if (currentFoodItem) {
+                foodItem = await renameFoodItemStable(existing.food_item_id, validation.value.name, {
+                    calories_per_100g: validation.value.calories_per_100g,
+                    updateCanonical: true
+                });
+            } else {
+                foodItem = await getOrCreateFoodItem(validation.value.name, {
+                    calories_per_100g: validation.value.calories_per_100g
+                });
+            }
+        } else {
+            foodItem = await getOrCreateFoodItem(validation.value.name, {
+                calories_per_100g: validation.value.calories_per_100g
+            });
+        }
+
+        await addFoodAlias(foodItem.id, existing.name);
+        await addFoodAlias(foodItem.id, validation.value.name);
+
+        await run(
+            `UPDATE inventory_items
+             SET name = ?, unit = ?, notes = ?, calories_per_100g = ?, food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+                foodItem.display_name || validation.value.name,
+                validation.value.unit,
+                validation.value.notes,
+                validation.value.calories_per_100g,
+                foodItem.id,
+                foodItem.canonical_key || canonicalKey,
+                req.params.id
+            ]
+        );
+
+        await recalculateInventoryItem(req.params.id);
+        const updated = await getInventoryItemWithFoodName(req.params.id);
+        const batches = await getInventoryBatches(req.params.id);
+        res.json(normalizeInventoryRow(updated, batches));
+    } catch (error) {
+        console.error("Fehler bei PUT /inventory/:id:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Aktualisieren des Inventar-Eintrags" });
+    }
+});
+
+app.patch("/inventory/:id/adjust", async (req, res) => {
+    try {
+        const action = req.body?.action === "add" ? "add" : req.body?.action === "remove" ? "remove" : "";
+        const mode = ["package", "loose", "auto"].includes(req.body?.mode) ? req.body.mode : "";
+        const amount = Number(req.body?.amount);
+        if (!action) return res.status(400).json({ error: "Aktion muss add oder remove sein." });
+        if (!mode) return res.status(400).json({ error: "Anpassungsart ist erforderlich." });
+        if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "Anpassungswert muss größer 0 sein." });
+        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        if (action === "add") {
+            if (mode === "package") {
+                await createInventoryPackageUnits(item.id, {
+                    count: amount,
+                    unitLabel: req.body.unitLabel,
+                    unitWeight: req.body.unitWeight,
+                    measureUnit: req.body.measureUnit,
+                    expiry_date: typeof req.body.expiry_date === "string" ? req.body.expiry_date : "",
+                    storage_location: typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "",
+                    notes: "Bestand hinzugefügt"
+                });
+            } else {
+                await createInventoryLooseAmount(item.id, {
+                    amount,
+                    measureUnit: req.body.measureUnit,
+                    expiry_date: typeof req.body.expiry_date === "string" ? req.body.expiry_date : "",
+                    storage_location: typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "",
+                    notes: "Freie Menge hinzugefügt"
+                });
+            }
+        } else {
+            if (mode === "package") {
+                const unitWeight = Number(req.body?.unitWeight);
+                const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
+                const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+                const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+                const countToRemove = Math.floor(amount);
+
+                if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                    return res.status(400).json({ error: "Ungültige Einheit." });
+                }
+
+                const packages = await all(
+                    `SELECT * FROM inventory_batches
+                     WHERE item_id = ?
+                       AND batch_type = 'package'
+                       AND unit_weight = ?
+                       AND measure_unit = ?
+                       AND storage_location = ?
+                       AND expiry_date = ?
+                       AND remaining_quantity > 0
+                     ORDER BY id ASC
+                     LIMIT ?`,
+                    [item.id, unitWeight, measureUnit, storageLocation, expiryDate, countToRemove]
+                );
+
+                if (packages.length < countToRemove) {
+                    return res.status(400).json({ error: "Nicht genügend Einheiten vorhanden." });
+                }
+
+                for (const pack of packages) {
+                    // Nicht löschen: Die Position bleibt als Bestand 0 sichtbar und kann später wieder erhöht werden.
+                    await run(
+                        `UPDATE inventory_batches
+                         SET remaining_quantity = 0, remaining_weight = 0, updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [pack.id]
+                    );
+                }
+            } else {
+                const measureUnit = normalizeMeasureUnit(req.body.measureUnit);
+                const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+                const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+                const hasStorageLocationFilter = Object.prototype.hasOwnProperty.call(req.body, "storage_location");
+                const hasExpiryDateFilter = Object.prototype.hasOwnProperty.call(req.body, "expiry_date");
+                let remainingToRemove = amount;
+                const looseWhere = ["item_id = ?", "batch_type = 'loose'", "measure_unit = ?", "remaining_weight > 0"];
+                const looseParams = [item.id, measureUnit];
+                if (hasStorageLocationFilter) { looseWhere.push("storage_location = ?"); looseParams.push(storageLocation); }
+                if (hasExpiryDateFilter) { looseWhere.push("expiry_date = ?"); looseParams.push(expiryDate); }
+                const looseRows = await all(
+                    `SELECT * FROM inventory_batches WHERE ${looseWhere.join(" AND ")} ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC`,
+                    looseParams
+                );
+                for (const row of looseRows) {
+                    if (remainingToRemove <= 0) break;
+                    const current = Number(row.remaining_weight ?? 0);
+                    const take = Math.min(current, remainingToRemove);
+                    await run(`UPDATE inventory_batches SET remaining_weight = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [Math.max(0, current - take), row.id]);
+                    remainingToRemove -= take;
+                }
+                if (mode === "auto" && remainingToRemove > 0) {
+                    const packageRows = await all(
+                        `SELECT * FROM inventory_batches WHERE item_id = ? AND batch_type = 'package' AND measure_unit = ? AND remaining_weight > 0 ORDER BY CASE WHEN expiry_date = '' THEN 1 ELSE 0 END, expiry_date ASC, id ASC`,
+                        [item.id, measureUnit]
+                    );
+                    for (const row of packageRows) {
+                        if (remainingToRemove <= 0) break;
+                        const current = Number(row.remaining_weight ?? 0);
+                        const take = Math.min(current, remainingToRemove);
+                        const newWeight = Math.max(0, current - take);
+                        const newQuantity = newWeight > 0 && Number(row.unit_weight ?? 0) > 0 ? newWeight / Number(row.unit_weight) : 0;
+                        await run(`UPDATE inventory_batches SET remaining_weight = ?, remaining_quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [newWeight, newQuantity, row.id]);
+                        remainingToRemove -= take;
+                    }
+                }
+                if (remainingToRemove > 0.000001) return res.status(400).json({ error: "Nicht genügend Bestand für diese Entnahme vorhanden." });
+            }
+        }
+        await recalculateInventoryItem(req.params.id);
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        const updatedBatches = await getInventoryBatches(req.params.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
+    } catch (error) {
+        console.error("Fehler bei PATCH /inventory/:id/adjust:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Anpassen des Inventarbestands" });
+    }
+});
+
+app.delete("/inventory/:id/stock-profile", async (req, res) => {
+    try {
+        const item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (!item) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+
+        const mode = req.body?.mode === "package" ? "package" : req.body?.mode === "loose" ? "loose" : "";
+        if (!mode) return res.status(400).json({ error: "Positionstyp ist erforderlich." });
+
+        const measureUnit = normalizeMeasureUnit(req.body?.measureUnit);
+        const storageLocation = typeof req.body.storage_location === "string" ? req.body.storage_location.trim() : "";
+        const expiryDate = typeof req.body.expiry_date === "string" ? req.body.expiry_date : "";
+
+        let result;
+        if (mode === "package") {
+            const unitWeight = Number(req.body?.unitWeight);
+            if (!Number.isFinite(unitWeight) || unitWeight <= 0) {
+                return res.status(400).json({ error: "Ungültige Einheit." });
+            }
+            result = await run(
+                `DELETE FROM inventory_batches
+                 WHERE item_id = ?
+                   AND batch_type = 'package'
+                   AND unit_weight = ?
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [item.id, unitWeight, measureUnit, storageLocation, expiryDate]
+            );
+        } else {
+            result = await run(
+                `DELETE FROM inventory_batches
+                 WHERE item_id = ?
+                   AND batch_type = 'loose'
+                   AND measure_unit = ?
+                   AND storage_location = ?
+                   AND expiry_date = ?`,
+                [item.id, measureUnit, storageLocation, expiryDate]
+            );
+        }
+
+        if (result.changes === 0) return res.status(404).json({ error: "Position nicht gefunden." });
+
+        await recalculateInventoryItem(item.id);
+        const updated = await get(`SELECT * FROM inventory_items WHERE id = ?`, [item.id]);
+        const updatedBatches = await getInventoryBatches(item.id);
+        res.json(normalizeInventoryRow(updated, updatedBatches));
+    } catch (error) {
+        console.error("Fehler bei DELETE /inventory/:id/stock-profile:", error.message);
+        res.status(500).json({ error: error.message || "Fehler beim Löschen der Bestandsposition" });
+    }
+});
+
+app.delete("/inventory/:id", async (req, res) => {
+    try {
+        await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [req.params.id]);
+        const result = await run(`DELETE FROM inventory_items WHERE id = ?`, [req.params.id]);
+        if (result.changes === 0) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Fehler bei DELETE /inventory/:id:", error.message);
+        res.status(500).json({ error: "Fehler beim Löschen des Inventar-Eintrags" });
+    }
+});
+
+
+
+
+async function getTableCountSafe(tableName) {
+    try {
+        const row = await get(`SELECT COUNT(*) AS count FROM ${tableName}`);
+        return Number(row?.count || 0);
+    } catch (error) {
+        return 0;
+    }
+}
+
+async function getDatabaseTableNames() {
+    const rows = await all(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name COLLATE NOCASE ASC
+    `);
+    return rows.map(row => row.name);
+}
+
+
+function quoteSqlIdentifier(identifier) {
+    const text = String(identifier || "");
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+        throw new Error("Ungültiger Tabellenname.");
+    }
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+async function getAdminTablePreview(tableName, limit = 200) {
+    const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500);
+    const tableNames = await getDatabaseTableNames();
+    if (!tableNames.includes(tableName)) {
+        throw new Error("Tabelle wurde nicht gefunden.");
+    }
+
+    const quotedTable = quoteSqlIdentifier(tableName);
+    const columns = await all(`PRAGMA table_info(${quotedTable})`);
+    const columnNames = columns.map(col => col.name);
+
+    let rows;
+    if (tableName === "food_aliases") {
+        rows = await all(`
+            SELECT
+                fa.id,
+                fa.alias_name,
+                fa.alias_key,
+                fa.food_item_id,
+                fi.display_name AS target_food_item,
+                fi.canonical_key AS target_canonical_key,
+                fa.created_at
+            FROM food_aliases fa
+            LEFT JOIN food_items fi ON fi.id = fa.food_item_id
+            ORDER BY fa.alias_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "food_items") {
+        rows = await all(`
+            SELECT
+                fi.*,
+                COUNT(DISTINCT fa.id) AS alias_count,
+                COUNT(DISTINCT ri.id) AS recipe_ingredient_count,
+                COALESCE(GROUP_CONCAT(DISTINCT hf.name), '') AS health_factors
+            FROM food_items fi
+            LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+            LEFT JOIN food_item_health_factors fihf ON fihf.food_item_id = fi.id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
+            GROUP BY fi.id
+            ORDER BY fi.display_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "recipe_ingredients") {
+        rows = await all(`
+            SELECT
+                ri.id,
+                ri.recipe_id,
+                r.name AS recipe_name,
+                ri.raw_text,
+                ri.food_name,
+                ri.amount,
+                ri.unit,
+                ri.food_item_id,
+                fi.display_name AS linked_food_item,
+                ri.link_source,
+                ri.canonical_key,
+                ri.sort_order,
+                ri.updated_at
+            FROM recipe_ingredients ri
+            LEFT JOIN recipes r ON r.id = ri.recipe_id
+            LEFT JOIN food_items fi ON fi.id = ri.food_item_id
+            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "inventory_items") {
+        rows = await all(`
+            SELECT
+                ii.*,
+                COALESCE(batch_stock.amount, 0) AS package_stock,
+                COALESCE(loose_stock.amount, 0) AS loose_stock,
+                COALESCE(batch_stock.amount, 0) + COALESCE(loose_stock.amount, 0) AS total_stock
+            FROM inventory_items ii
+            LEFT JOIN (
+                SELECT item_id, SUM(remaining_quantity) AS amount
+                FROM inventory_batches
+                WHERE COALESCE(batch_type, 'package') != 'loose'
+                GROUP BY item_id
+            ) batch_stock ON batch_stock.item_id = ii.id
+            LEFT JOIN (
+                SELECT item_id, SUM(remaining_weight) AS amount
+                FROM inventory_batches
+                WHERE COALESCE(batch_type, '') = 'loose'
+                GROUP BY item_id
+            ) loose_stock ON loose_stock.item_id = ii.id
+            ORDER BY ii.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "health_factors") {
+        rows = await all(`
+            SELECT
+                hf.*,
+                COUNT(DISTINCT fihf.food_item_id) AS food_item_count
+            FROM health_factors hf
+            LEFT JOIN food_item_health_factors fihf ON fihf.health_factor_id = hf.id
+            GROUP BY hf.id
+            ORDER BY hf.category COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else if (tableName === "food_item_health_factors") {
+        rows = await all(`
+            SELECT
+                fihf.id,
+                fihf.food_item_id,
+                fi.display_name AS food_item,
+                fihf.health_factor_id,
+                hf.name AS health_factor,
+                hf.category,
+                fihf.notes,
+                fihf.created_at
+            FROM food_item_health_factors fihf
+            LEFT JOIN food_items fi ON fi.id = fihf.food_item_id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
+            ORDER BY fi.display_name COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [safeLimit]);
+    } else {
+        rows = await all(`SELECT * FROM ${quotedTable} LIMIT ?`, [safeLimit]);
+    }
+
+    return {
+        table: tableName,
+        limit: safeLimit,
+        total_count: await getTableCountSafe(tableName),
+        columns: rows.length ? Object.keys(rows[0]) : columnNames,
+        rows
+    };
+}
+
+
+
+async function getFoodItemAdminDetail(foodItemId) {
+    const id = Number(foodItemId);
+    if (!Number.isFinite(id)) throw new Error("Ungültige Lebensmittel-ID.");
+    const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
+    if (!item) throw new Error("Lebensmittel-Stammsatz wurde nicht gefunden.");
+
+    const aliases = await all(`
+        SELECT id, alias_name, alias_key, created_at
+        FROM food_aliases
+        WHERE food_item_id = ?
+        ORDER BY alias_name COLLATE NOCASE ASC
+    `, [id]);
+
+    const recipeIngredients = await all(`
+        SELECT
+            ri.id,
+            ri.recipe_id,
+            r.name AS recipe_name,
+            ri.raw_text,
+            ri.food_name,
+            ri.amount,
+            ri.unit,
+            ri.link_source,
+            ri.sort_order,
+            ri.updated_at
+        FROM recipe_ingredients ri
+        LEFT JOIN recipes r ON r.id = ri.recipe_id
+        WHERE ri.food_item_id = ?
+        ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+    `, [id]);
+
+    const inventoryItems = await all(`
+        SELECT
+            ii.id,
+            ii.name,
+            ii.unit,
+            ii.source,
+            ii.canonical_name,
+            ii.calories_per_100g,
+            COALESCE(batch_stock.amount, 0) AS package_stock,
+            COALESCE(loose_stock.amount, 0) AS loose_stock,
+            COALESCE(batch_stock.amount, 0) + COALESCE(loose_stock.amount, 0) AS total_stock
+        FROM inventory_items ii
+        LEFT JOIN (
+            SELECT item_id, SUM(remaining_quantity) AS amount
+            FROM inventory_batches
+            WHERE COALESCE(batch_type, 'package') != 'loose'
+            GROUP BY item_id
+        ) batch_stock ON batch_stock.item_id = ii.id
+        LEFT JOIN (
+            SELECT item_id, SUM(remaining_weight) AS amount
+            FROM inventory_batches
+            WHERE COALESCE(batch_type, '') = 'loose'
+            GROUP BY item_id
+        ) loose_stock ON loose_stock.item_id = ii.id
+        WHERE ii.food_item_id = ?
+        ORDER BY ii.name COLLATE NOCASE ASC
+    `, [id]);
+
+    const healthFactors = await all(`
+        SELECT
+            hf.id,
+            hf.name,
+            hf.category,
+            hf.description,
+            fihf.notes
+        FROM food_item_health_factors fihf
+        JOIN health_factors hf ON hf.id = fihf.health_factor_id
+        WHERE fihf.food_item_id = ?
+        ORDER BY hf.category COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+    `, [id]);
+
+    return { item, aliases, recipe_ingredients: recipeIngredients, inventory_items: inventoryItems, health_factors: healthFactors };
+}
+
+async function getAdminFoodItemOptions() {
+    return all(`
+        SELECT
+            fi.id,
+            fi.display_name,
+            fi.canonical_key,
+            COUNT(DISTINCT fa.id) AS alias_count,
+            COUNT(DISTINCT ri.id) AS recipe_ingredient_count
+        FROM food_items fi
+        LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+        LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+        GROUP BY fi.id
+        ORDER BY fi.display_name COLLATE NOCASE ASC
+    `);
+}
+
+async function buildAdminSystemStatus() {
+    const [recipes, recipeIngredients, inventoryItems, inventoryBatches, foodItems, foodAliases, mealPlans, ignoredDuplicatePairs] = await Promise.all([
+        getTableCountSafe('recipes'), getTableCountSafe('recipe_ingredients'), getTableCountSafe('inventory_items'), getTableCountSafe('inventory_batches'), getTableCountSafe('food_items'), getTableCountSafe('food_aliases'), getTableCountSafe('meal_plans'), getTableCountSafe('admin_ignored_duplicate_pairs')
+    ]);
+    const looseCountRow = await get(`SELECT COUNT(*) AS count FROM inventory_batches WHERE COALESCE(batch_type, '') = 'loose'`).catch(() => ({ count: 0 }));
+    const inventoryLooseStock = Number(looseCountRow?.count || 0);
+    const stockRows = await all(`
+        SELECT item_id, SUM(remaining_weight) AS amount FROM inventory_batches WHERE COALESCE(batch_type, '') = 'loose' GROUP BY item_id
+        UNION ALL
+        SELECT item_id, SUM(remaining_quantity) AS amount FROM inventory_batches WHERE COALESCE(batch_type, 'package') != 'loose' GROUP BY item_id
+    `).catch(() => []);
+    const itemStock = new Map();
+    stockRows.forEach(row => {
+        const id = Number(row.item_id);
+        itemStock.set(id, (itemStock.get(id) || 0) + Number(row.amount || 0));
+    });
+    const itemsWithStock = Array.from(itemStock.values()).filter(value => value > 0).length;
+    const linkedRow = await get(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NOT NULL`).catch(() => ({ count: 0 }));
+    const linkedRecipeIngredients = Number(linkedRow?.count || 0);
+    const unlinkedRecipeIngredients = Math.max(0, recipeIngredients - linkedRecipeIngredients);
+    const tableNames = await getDatabaseTableNames();
+    const tableCounts = [];
+    for (const table of tableNames) {
+        tableCounts.push({ name: table, count: await getTableCountSafe(table) });
+    }
+    return {
+        generated_at: new Date().toISOString(),
+        database_path: dbPath,
+        counts: {
+            recipes,
+            recipe_ingredients: recipeIngredients,
+            linked_recipe_ingredients: linkedRecipeIngredients,
+            unlinked_recipe_ingredients: unlinkedRecipeIngredients,
+            inventory_items: inventoryItems,
+            inventory_items_with_stock: itemsWithStock,
+            inventory_batches: inventoryBatches,
+            inventory_loose_stock: inventoryLooseStock,
+            food_items: foodItems,
+            food_aliases: foodAliases,
+            meal_plans: mealPlans,
+            ignored_duplicate_pairs: ignoredDuplicatePairs
+        },
+        tables: tableCounts
+    };
+}
+
+async function buildFullJsonBackup() {
+    const tableNames = await getDatabaseTableNames();
+    const tables = {};
+    for (const table of tableNames) {
+        tables[table] = await all(`SELECT * FROM ${table}`);
+    }
+    return {
+        app: 'Food Calculator',
+        format: 'foodcalculator-json-backup-v1',
+        exported_at: new Date().toISOString(),
+        database_path: dbPath,
+        tables
+    };
+}
+
+app.get("/admin/inventory-cleanup-preview", async (req, res) => {
+    try {
+        const preview = await buildInventoryCleanupPreview();
+        res.json(preview);
+    } catch (error) {
+        console.error("Fehler bei GET /admin/inventory-cleanup-preview:", error.message);
+        res.status(500).json({ error: "Inventar-Bereinigungsanalyse konnte nicht erstellt werden." });
+    }
+});
+
+app.post("/admin/inventory-cleanup-apply", async (req, res) => {
+    try {
+        const deleteIds = Array.isArray(req.body?.delete_item_ids) ? req.body.delete_item_ids.map(Number).filter(Number.isFinite) : [];
+        if (!deleteIds.length) return res.status(400).json({ error: "Keine Artikel zum Löschen ausgewählt." });
+
+        const preview = await buildInventoryCleanupPreview();
+        const allowedIds = new Set(preview.orphan_recipe_items.map(item => Number(item.id)));
+        const safeDeleteIds = deleteIds.filter(id => allowedIds.has(id));
+        if (!safeDeleteIds.length) {
+            return res.status(400).json({ error: "Keine sicher löschbaren Artikel ausgewählt." });
+        }
+
+        for (const id of safeDeleteIds) {
+            await run(`DELETE FROM inventory_batches WHERE item_id = ?`, [id]);
+            await run(`DELETE FROM inventory_items WHERE id = ?`, [id]);
+        }
+
+        const updatedPreview = await buildInventoryCleanupPreview();
+        res.json({ success: true, deleted_item_ids: safeDeleteIds, preview: updatedPreview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/inventory-cleanup-apply:", error.message);
+        res.status(500).json({ error: "Inventar-Bereinigung konnte nicht ausgeführt werden." });
+    }
+});
+
+app.delete("/admin/inventory-items/:id", async (req, res) => {
+    try {
+        const deleted = await deleteInventoryItemCompletely(req.params.id);
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, deleted_item: deleted, preview });
+    } catch (error) {
+        console.error("Fehler bei DELETE /admin/inventory-items/:id:", error.message);
+        res.status(500).json({ error: error.message || "Artikel konnte nicht gelöscht werden." });
+    }
+});
+
+
+app.post("/admin/duplicates/merge", async (req, res) => {
+    try {
+        const masterItemId = Number(req.body?.master_item_id);
+        const duplicateItemId = Number(req.body?.duplicate_item_id);
+        const merged = await mergeInventoryItems(masterItemId, duplicateItemId);
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, merged, preview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/duplicates/merge:", error.message);
+        res.status(500).json({ error: error.message || "Dubletten konnten nicht zusammengeführt werden." });
+    }
+});
+
+app.post("/admin/duplicates/merge-all", async (req, res) => {
+    try {
+        const masterItemId = Number(req.body?.master_item_id);
+        const duplicateItemIds = Array.isArray(req.body?.duplicate_item_ids) ? req.body.duplicate_item_ids : [];
+        const merged = await mergeInventoryItemsIntoMaster(masterItemId, duplicateItemIds);
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, merged, preview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/duplicates/merge-all:", error.message);
+        res.status(500).json({ error: error.message || "Dubletten konnten nicht gesammelt zusammengeführt werden." });
+    }
+});
+
+app.post("/admin/duplicate-keep-both", async (req, res) => {
+    try {
+        const pair = normalizeDuplicatePairIds(req.body?.item_id_a, req.body?.item_id_b);
+        if (!pair) return res.status(400).json({ error: "Zwei unterschiedliche Artikel sind erforderlich." });
+        const itemA = await get(`SELECT * FROM inventory_items WHERE id = ?`, [pair[0]]);
+        const itemB = await get(`SELECT * FROM inventory_items WHERE id = ?`, [pair[1]]);
+        if (!itemA || !itemB) return res.status(404).json({ error: "Mindestens ein Artikel wurde nicht gefunden." });
+        const canonicalKey = itemA.canonical_name || itemB.canonical_name || buildFoodIdentity(itemA.name || itemB.name).canonical_key || "";
+        await run(
+            `INSERT OR IGNORE INTO admin_ignored_duplicate_pairs (item_id_a, item_id_b, canonical_key) VALUES (?, ?, ?)`,
+            [pair[0], pair[1], canonicalKey]
+        );
+        const preview = await buildInventoryCleanupPreview();
+        res.json({ success: true, ignored_pair: { item_id_a: pair[0], item_id_b: pair[1] }, preview });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/duplicate-keep-both:", error.message);
+        res.status(500).json({ error: "Dubletten-Entscheidung konnte nicht gespeichert werden." });
+    }
+});
+
+
+app.post("/admin/recipe-resync-overrides", async (req, res) => {
+    try {
+        const overrideType = String(req.body?.override_type || "").trim();
+        const canonicalKey = String(req.body?.canonical_key || "").trim();
+        const inventoryItemId = req.body?.inventory_item_id === null || req.body?.inventory_item_id === undefined ? null : Number(req.body.inventory_item_id);
+        const targetInventoryItemId = req.body?.target_inventory_item_id === null || req.body?.target_inventory_item_id === undefined ? null : Number(req.body.target_inventory_item_id);
+        const action = String(req.body?.action || "").trim();
+        const note = String(req.body?.note || "").trim();
+
+        if (!["create", "delete"].includes(overrideType)) return res.status(400).json({ error: "Ungültiger Override-Typ." });
+        if (!["link_existing", "ignore", "clear"].includes(action)) return res.status(400).json({ error: "Ungültige Aktion." });
+        if (overrideType === "create" && !canonicalKey) return res.status(400).json({ error: "Canonical Key fehlt." });
+        if (overrideType === "delete" && !Number.isFinite(inventoryItemId)) return res.status(400).json({ error: "Inventarartikel fehlt." });
+        if (action === "link_existing" && !Number.isFinite(targetInventoryItemId)) return res.status(400).json({ error: "Zielartikel fehlt." });
+        if (overrideType === "delete" && action === "link_existing" && Number(inventoryItemId) === Number(targetInventoryItemId)) {
+            return res.status(400).json({ error: "Ein Löschkandidat kann nicht mit sich selbst verknüpft werden." });
+        }
+
+        const inventoryKey = Number.isFinite(inventoryItemId) ? inventoryItemId : 0;
+        if (action === "clear") {
+            await run(
+                `DELETE FROM admin_recipe_resync_overrides WHERE override_type = ? AND canonical_key = ? AND inventory_item_id = ?`,
+                [overrideType, canonicalKey, inventoryKey]
+            );
+        } else {
+            await run(
+                `INSERT INTO admin_recipe_resync_overrides (override_type, canonical_key, inventory_item_id, target_inventory_item_id, action, note, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(override_type, canonical_key, inventory_item_id)
+                 DO UPDATE SET target_inventory_item_id = excluded.target_inventory_item_id, action = excluded.action, note = excluded.note, updated_at = CURRENT_TIMESTAMP`,
+                [overrideType, canonicalKey, inventoryKey, Number.isFinite(targetInventoryItemId) ? targetInventoryItemId : null, action, note]
+            );
+        }
+
+        res.json({ success: true, preview: await buildRecipeIngredientRebuildPlan() });
+    } catch (error) {
+        console.error("Fehler bei POST /admin/recipe-resync-overrides:", error.message);
+        res.status(500).json({ error: error.message || "Override konnte nicht gespeichert werden." });
+    }
+});
 
 app.get("/admin/recipe-resync-preview", async (req, res) => {
     try {
@@ -2404,224 +3406,6 @@ app.post("/admin/recipe-resync-apply", async (req, res) => {
         res.status(500).json({ error: error.message || "Rezept-Zutaten konnten nicht neu aufgebaut werden." });
     }
 });
-const ADMIN_TABLES = [
-    "recipes",
-    "recipe_ingredients",
-    "food_items",
-    "food_aliases",
-    "inventory_items",
-    "inventory_batches",
-    "health_factors",
-    "food_item_health_factors",
-    "meal_plans",
-    "admin_recipe_resync_overrides",
-    "admin_ignored_duplicate_pairs"
-];
-
-function clampAdminLimit(value) {
-    const limit = Number(value || 500);
-    if (!Number.isFinite(limit)) return 500;
-    return Math.max(10, Math.min(5000, Math.floor(limit)));
-}
-
-function assertAdminTableName(tableName) {
-    const name = String(tableName || "").trim();
-    if (!ADMIN_TABLES.includes(name)) throw new Error("Ungültiger oder nicht freigegebener Tabellenname.");
-    return name;
-}
-
-async function safeCount(sql, params = []) {
-    try {
-        const row = await get(sql, params);
-        return Number(row?.count || 0);
-    } catch (error) {
-        console.warn("Admin count failed:", error.message, sql);
-        return 0;
-    }
-}
-
-async function getAdminTableCount(tableName) {
-    const table = assertAdminTableName(tableName);
-    return safeCount(`SELECT COUNT(*) AS count FROM ${table}`);
-}
-
-async function buildAdminSystemStatus() {
-    const tables = [];
-    for (const table of ADMIN_TABLES) {
-        tables.push({ name: table, count: await getAdminTableCount(table) });
-    }
-
-    const counts = {
-        recipes: await safeCount(`SELECT COUNT(*) AS count FROM recipes`),
-        recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients`),
-        linked_recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NOT NULL`),
-        unlinked_recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NULL`),
-        inventory_items: await safeCount(`SELECT COUNT(*) AS count FROM inventory_items`),
-        inventory_items_with_stock: await safeCount(`
-            SELECT COUNT(*) AS count
-            FROM (
-                SELECT ii.id
-                FROM inventory_items ii
-                LEFT JOIN inventory_batches ib ON ib.item_id = ii.id
-                GROUP BY ii.id
-                HAVING COALESCE(SUM(COALESCE(ib.remaining_quantity, 0) + COALESCE(ib.remaining_weight, 0)), 0)
-                       + COALESCE(ii.quantity, 0) + COALESCE(ii.weight, 0) > 0
-            ) stocked
-        `),
-        food_items: await safeCount(`SELECT COUNT(*) AS count FROM food_items`),
-        food_aliases: await safeCount(`SELECT COUNT(*) AS count FROM food_aliases`),
-        health_factors: await safeCount(`SELECT COUNT(*) AS count FROM health_factors`)
-    };
-
-    return {
-        generated_at: new Date().toISOString(),
-        database_path: dbPath,
-        counts,
-        tables
-    };
-}
-
-async function getAdminTablePreview(tableName, requestedLimit = 500) {
-    const table = assertAdminTableName(tableName);
-    const limit = clampAdminLimit(requestedLimit);
-    const totalRow = await get(`SELECT COUNT(*) AS count FROM ${table}`);
-    const totalCount = Number(totalRow?.count || 0);
-    let rows = [];
-    let columns = [];
-
-    if (table === "food_items") {
-        rows = await all(`
-            SELECT
-                fi.id,
-                fi.display_name,
-                fi.canonical_key,
-                fi.calories_per_100g,
-                COUNT(DISTINCT fa.id) AS alias_count,
-                COUNT(DISTINCT ri.id) AS recipe_count,
-                COUNT(DISTINCT ii.id) AS inventory_count,
-                GROUP_CONCAT(DISTINCT hf.name) AS health_factors,
-                fi.created_at,
-                fi.updated_at
-            FROM food_items fi
-            LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
-            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
-            LEFT JOIN inventory_items ii ON ii.food_item_id = fi.id
-            LEFT JOIN food_item_health_factors fihf ON fihf.food_item_id = fi.id
-            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
-            GROUP BY fi.id
-            ORDER BY fi.display_name COLLATE NOCASE ASC
-            LIMIT ?
-        `, [limit]);
-        columns = ["id", "display_name", "canonical_key", "calories_per_100g", "alias_count", "recipe_count", "inventory_count", "health_factors", "created_at", "updated_at"];
-    } else if (table === "food_aliases") {
-        rows = await all(`
-            SELECT
-                fa.id,
-                fa.alias_name,
-                fa.alias_key,
-                fa.food_item_id,
-                fi.display_name AS target_food_item,
-                fa.created_at
-            FROM food_aliases fa
-            LEFT JOIN food_items fi ON fi.id = fa.food_item_id
-            ORDER BY fa.alias_name COLLATE NOCASE ASC
-            LIMIT ?
-        `, [limit]);
-        columns = ["id", "alias_name", "alias_key", "food_item_id", "target_food_item", "created_at"];
-    } else if (table === "recipe_ingredients") {
-        rows = await all(`
-            SELECT
-                ri.id,
-                ri.recipe_id,
-                r.name AS recipe_name,
-                ri.sort_order,
-                ri.raw_text,
-                ri.food_name,
-                ri.amount,
-                ri.unit,
-                ri.food_item_id,
-                fi.display_name AS linked_food_item,
-                ri.canonical_key,
-                ri.link_source,
-                ri.created_at,
-                ri.updated_at
-            FROM recipe_ingredients ri
-            LEFT JOIN recipes r ON r.id = ri.recipe_id
-            LEFT JOIN food_items fi ON fi.id = ri.food_item_id
-            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
-            LIMIT ?
-        `, [limit]);
-        columns = ["id", "recipe_id", "recipe_name", "sort_order", "raw_text", "food_name", "amount", "unit", "food_item_id", "linked_food_item", "canonical_key", "link_source", "created_at", "updated_at"];
-    } else if (table === "inventory_items") {
-        rows = await all(`
-            SELECT
-                ii.id,
-                ii.name AS legacy_name,
-                COALESCE(NULLIF(fi.display_name, ''), ii.name) AS display_name,
-                ii.food_item_id,
-                fi.canonical_key AS food_canonical_key,
-                ii.canonical_name,
-                ii.unit,
-                ii.calories_per_100g,
-                COUNT(DISTINCT ri.id) AS recipe_count,
-                COALESCE(SUM(COALESCE(ib.remaining_quantity, 0) + COALESCE(ib.remaining_weight, 0)), 0) AS stock_total,
-                ii.created_at,
-                ii.updated_at
-            FROM inventory_items ii
-            LEFT JOIN food_items fi ON fi.id = ii.food_item_id
-            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = ii.food_item_id
-            LEFT JOIN inventory_batches ib ON ib.item_id = ii.id
-            GROUP BY ii.id
-            ORDER BY display_name COLLATE NOCASE ASC
-            LIMIT ?
-        `, [limit]);
-        columns = ["id", "display_name", "legacy_name", "food_item_id", "food_canonical_key", "canonical_name", "unit", "calories_per_100g", "recipe_count", "stock_total", "created_at", "updated_at"];
-    } else if (table === "food_item_health_factors") {
-        rows = await all(`
-            SELECT
-                fihf.id,
-                fihf.food_item_id,
-                fi.display_name AS food_item,
-                fihf.health_factor_id,
-                hf.name AS health_factor,
-                hf.category,
-                fihf.notes,
-                fihf.created_at
-            FROM food_item_health_factors fihf
-            LEFT JOIN food_items fi ON fi.id = fihf.food_item_id
-            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
-            ORDER BY fi.display_name COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
-            LIMIT ?
-        `, [limit]);
-        columns = ["id", "food_item_id", "food_item", "health_factor_id", "health_factor", "category", "notes", "created_at"];
-    } else {
-        rows = await all(`SELECT * FROM ${table} ORDER BY id DESC LIMIT ?`, [limit]);
-        if (rows.length) columns = Object.keys(rows[0]);
-        else {
-            const info = await all(`PRAGMA table_info(${table})`);
-            columns = info.map(column => column.name);
-        }
-    }
-
-    return { table, columns, rows, total_count: totalCount, limit };
-}
-
-async function buildFullJsonBackup() {
-    const backup = {
-        generated_at: new Date().toISOString(),
-        database_path: dbPath,
-        tables: {}
-    };
-    for (const table of ADMIN_TABLES) {
-        try {
-            backup.tables[table] = await all(`SELECT * FROM ${table}`);
-        } catch (error) {
-            backup.tables[table] = { error: error.message };
-        }
-    }
-    return backup;
-}
-
 
 
 
@@ -2826,7 +3610,7 @@ app.put("/admin/food-aliases/:id", async (req, res) => {
     }
 });
 
-async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [], options = {}) {
+async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = []) {
     const masterId = Number(masterFoodItemId);
     const duplicateIds = Array.from(new Set((Array.isArray(duplicateFoodItemIds) ? duplicateFoodItemIds : [])
         .map(Number)
@@ -2836,8 +3620,7 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [],
         throw new Error("Ein Master-Lebensmittel und mindestens eine Dublette sind erforderlich.");
     }
 
-    const manageTransaction = options.manageTransaction !== false;
-    if (manageTransaction) await run("BEGIN");
+    await run("BEGIN");
     try {
         const master = await get(`SELECT * FROM food_items WHERE id = ?`, [masterId]);
         if (!master) throw new Error("Master-Lebensmittel wurde nicht gefunden.");
@@ -2912,13 +3695,13 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [],
             [master.display_name || "", master.canonical_key || "", masterId]
         );
 
-        if (manageTransaction) await run("COMMIT");
+        await run("COMMIT");
         return {
             master: await getFoodItemAdminDetail(masterId),
             merged
         };
     } catch (error) {
-        if (manageTransaction) await run("ROLLBACK");
+        await run("ROLLBACK");
         throw error;
     }
 }
