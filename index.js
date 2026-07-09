@@ -3396,15 +3396,9 @@ app.get("/admin/recipe-resync-preview", async (req, res) => {
 });
 
 app.post("/admin/recipe-resync-apply", async (req, res) => {
-    try {
-        const result = await applyRecipeIngredientRebuild({ deleteAllZeroStock: Boolean(req.body?.delete_all_zero_stock) });
-        const preview = await buildRecipeIngredientRebuildPlan();
-        const cleanupPreview = await buildInventoryCleanupPreview();
-        res.json({ success: true, result, preview, cleanup_preview: cleanupPreview });
-    } catch (error) {
-        console.error("Fehler bei POST /admin/recipe-resync-apply:", error.message);
-        res.status(500).json({ error: error.message || "Rezept-Zutaten konnten nicht neu aufgebaut werden." });
-    }
+    res.status(410).json({
+        error: "Die Rezept-Zutaten-Synchronisierung wurde deaktiviert. Bitte nutze die Admin-Vorschau nur noch zur Analyse."
+    });
 });
 
 
