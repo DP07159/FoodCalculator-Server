@@ -2375,6 +2375,60 @@ async function buildInventoryCleanupPreview() {
 }
 
 
+
+app.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
+    try {
+        const foodItemId = Number.parseInt(req.params.foodItemId, 10);
+        if (!Number.isInteger(foodItemId) || foodItemId <= 0) {
+            return res.status(400).json({ error: "Gültige food_item_id ist erforderlich." });
+        }
+
+        const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
+        if (!foodItem) return res.status(404).json({ error: "Lebensmittel-Stammsatz nicht gefunden." });
+
+        const rows = await all(`
+            SELECT
+                r.*,
+                ri.id AS ingredient_link_id,
+                ri.raw_text AS ingredient_raw_text,
+                ri.food_name AS ingredient_food_name,
+                ri.amount AS ingredient_amount,
+                ri.unit AS ingredient_unit,
+                ri.sort_order AS ingredient_sort_order
+            FROM recipe_ingredients ri
+            INNER JOIN recipes r ON r.id = ri.recipe_id
+            WHERE ri.food_item_id = ?
+            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+        `, [foodItemId]);
+
+        const recipeMap = new Map();
+        for (const row of rows) {
+            if (!recipeMap.has(row.id)) {
+                recipeMap.set(row.id, {
+                    ...normalizeRecipeRow(row),
+                    matched_ingredients: []
+                });
+            }
+            recipeMap.get(row.id).matched_ingredients.push({
+                id: row.ingredient_link_id,
+                raw_text: row.ingredient_raw_text || row.ingredient_food_name || "",
+                food_name: row.ingredient_food_name || foodItem.display_name || "",
+                amount: row.ingredient_amount,
+                unit: row.ingredient_unit || ""
+            });
+        }
+
+        res.json({
+            food_item_id: foodItemId,
+            food_item: normalizeFoodItemRow(foodItem),
+            recipes: Array.from(recipeMap.values())
+        });
+    } catch (error) {
+        console.error("Fehler bei GET /recipes/by-food-item/:foodItemId:", error.message);
+        res.status(500).json({ error: "Rezepte zum Lebensmittel konnten nicht geladen werden" });
+    }
+});
+
 app.get("/recipes/by-ingredient/:name", async (req, res) => {
     try {
         const ingredientName = normalizeIngredientText(req.params.name || "");
