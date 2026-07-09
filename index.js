@@ -2139,107 +2139,106 @@ async function buildRecipeIngredientRebuildPlan() {
 async function applyRecipeIngredientRebuild(options = {}) {
     const recipes = await all(`SELECT * FROM recipes ORDER BY id ASC`);
     let createdItems = 0;
+    let renamedItems = 0;
     let linkedIngredients = 0;
-    let preservedIngredients = 0;
     let deletedItems = [];
     const deleteAllZeroStock = Boolean(options.deleteAllZeroStock);
 
     await run("BEGIN");
     try {
-        const previousLinksByRecipe = new Map();
-        const previousLinks = await all(
-            `SELECT sort_order, raw_text, food_name, canonical_key, food_item_id, link_source, recipe_id
-             FROM recipe_ingredients
-             ORDER BY recipe_id ASC, sort_order ASC`
-        );
-        for (const link of previousLinks) {
-            if (!previousLinksByRecipe.has(Number(link.recipe_id))) previousLinksByRecipe.set(Number(link.recipe_id), []);
-            previousLinksByRecipe.get(Number(link.recipe_id)).push(link);
-        }
-
+        const inventoryItems = await getAllInventoryItemsWithBatches();
         const overrides = await getRecipeResyncOverrides();
         const overrideMaps = buildRecipeResyncOverrideMaps(overrides);
+        const targetInventoryByCanonical = new Map();
         const usedInventoryIds = new Set();
-        const usedFoodItemIds = new Set();
 
         for (const recipe of recipes) {
             const parsed = parseIngredientsText(recipe.ingredients || "");
-            const previousRecipeLinks = previousLinksByRecipe.get(Number(recipe.id)) || [];
+            for (const ingredient of parsed) {
+                const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
+                if (!canonicalKey || targetInventoryByCanonical.has(canonicalKey)) continue;
+                if (overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
 
-            await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipe.id]);
+                let item = null;
+                const overrideTargetId = overrideMaps.linkByCanonical.get(canonicalKey);
+                if (overrideTargetId) item = inventoryItems.find(candidate => Number(candidate.id) === Number(overrideTargetId)) || null;
+                if (!item) item = chooseInventoryItemForParsedTarget(ingredient, inventoryItems, usedInventoryIds);
+                if (item) {
+                    usedInventoryIds.add(Number(item.id));
 
+                    // WICHTIG: Wenn ein Resync-Kandidat mit einem bestehenden Artikel verknüpft wird,
+                    // darf daraus kein neuer food_item entstehen. Der bestehende food_item bleibt der Master;
+                    // die neu erkannte Rezept-Schreibweise wird nur als Alias ergänzt.
+                    let foodItem = null;
+                    if (item.food_item_id) foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]);
+                    if (!foodItem) {
+                        foodItem = await getOrCreateFoodItem(item.name || ingredient.food_name, { aliasName: item.recipe_match_name || item.name });
+                    }
+
+                    await addFoodAlias(foodItem.id, item.name);
+                    await addFoodAlias(foodItem.id, item.recipe_match_name || item.name);
+                    await addFoodAlias(foodItem.id, ingredient.raw_text);
+                    await addFoodAlias(foodItem.id, ingredient.food_name);
+
+                    const isExplicitOverride = Boolean(overrideTargetId);
+                    const shouldRename = !isExplicitOverride && isRecipeGeneratedWithoutStock(item) && normalizeGermanText(item.name) !== normalizeGermanText(ingredient.food_name);
+                    await run(
+                        `UPDATE inventory_items
+                         SET name = ?,
+                             recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
+                             canonical_name = ?,
+                             food_item_id = ?,
+                             unit = COALESCE(NULLIF(unit, ''), ?),
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = ?`,
+                        [shouldRename ? ingredient.food_name : item.name, ingredient.food_name, foodItem.canonical_key, foodItem.id, ingredient.unit || "g", item.id]
+                    );
+                    if (shouldRename) renamedItems += 1;
+                    item = { ...item, name: shouldRename ? ingredient.food_name : item.name, canonical_name: foodItem.canonical_key, food_item_id: foodItem.id };
+                } else {
+                    const foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    const result = await run(
+                        `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
+                         VALUES (?, 0, ?, 0, '', '', '', 'recipe', ?, ?, ?, ?)`,
+                        [ingredient.food_name, ingredient.unit || "g", ingredient.food_name, foodItem.calories_per_100g ?? null, foodItem.id, foodItem.canonical_key]
+                    );
+                    item = await get(`SELECT * FROM inventory_items WHERE id = ?`, [result.lastID]);
+                    inventoryItems.push(normalizeInventoryRow(item, []));
+                    usedInventoryIds.add(Number(item.id));
+                    createdItems += 1;
+                }
+                targetInventoryByCanonical.set(canonicalKey, item);
+            }
+        }
+
+        await run(`DELETE FROM recipe_ingredients`);
+
+        for (const recipe of recipes) {
+            const parsed = parseIngredientsText(recipe.ingredients || "");
             for (const [index, ingredient] of parsed.entries()) {
                 const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
                 if (canonicalKey && overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
-
-                let foodItem = null;
-                let linkSource = "rebuilt";
-
-                // Wichtigster Schutz: bestehende, einmal gesetzte Verknüpfungen bleiben erhalten.
-                // Die Admin-Synchronisierung darf sie nicht durch neue Parse-Entscheidungen überschreiben.
-                const preserved = await getPreservedFoodItemForIngredient(previousRecipeLinks, index, ingredient);
-                if (preserved?.foodItem) {
-                    foodItem = preserved.foodItem;
-                    linkSource = preserved.linkSource || "preserved_resync";
-                    preservedIngredients += 1;
-                }
-
-                // Admin-Override: nur wenn keine bestehende Verknüpfung erhalten werden konnte.
-                if (!foodItem && canonicalKey) {
-                    const overrideTargetId = overrideMaps.linkByCanonical.get(canonicalKey);
-                    if (overrideTargetId) {
-                        const targetItem = await get(`SELECT * FROM inventory_items WHERE id = ?`, [overrideTargetId]);
-                        if (targetItem?.food_item_id) {
-                            foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [targetItem.food_item_id]);
-                            if (foodItem) linkSource = "admin_override";
-                        }
-                    }
-                }
-
-                // Sicherer automatischer Fallback: nur exakter Food-Item-/Alias-Treffer.
-                if (!foodItem) {
-                    foodItem = await findFoodItemByName(ingredient.food_name);
-                    if (foodItem) linkSource = "auto_exact";
-                }
-
-                // Erst wenn wirklich kein bestehender Artikel/Alias/Preserve-Treffer existiert, neu anlegen.
-                if (!foodItem) {
-                    foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
-                    linkSource = "new_from_resync";
-                    createdItems += 1;
-                }
-
+                const item = canonicalKey ? targetInventoryByCanonical.get(canonicalKey) : null;
+                let foodItem = item?.food_item_id ? await get(`SELECT * FROM food_items WHERE id = ?`, [item.food_item_id]) : null;
+                if (!foodItem) foodItem = await getOrCreateFoodItem(ingredient.food_name, { aliasName: ingredient.raw_text });
                 await addFoodAlias(foodItem.id, ingredient.raw_text);
                 await addFoodAlias(foodItem.id, ingredient.food_name);
-                await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "admin_override" ? "manual" : "recipe" });
-
-                const inventoryItem = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [foodItem.id]);
-                if (inventoryItem?.id) usedInventoryIds.add(Number(inventoryItem.id));
-                usedFoodItemIds.add(Number(foodItem.id));
-
                 await run(
                     `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key, link_source)
-                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
-                    [recipe.id, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key, linkSource]
+                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 'rebuilt')`,
+                    [recipe.id, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key]
                 );
                 linkedIngredients += 1;
             }
         }
 
-        // Nach dem Neuaufbau dürfen nur ungenutzte, bestandslose Altlasten entfernt werden.
-        // Alles, was aktuell über recipe_ingredients.food_item_id verknüpft ist, bleibt geschützt.
-        const linkedFoodRows = await all(`SELECT DISTINCT food_item_id FROM recipe_ingredients WHERE food_item_id IS NOT NULL`);
-        for (const row of linkedFoodRows) usedFoodItemIds.add(Number(row.food_item_id));
-
         const currentInventoryItems = await getAllInventoryItemsWithBatches();
+        const usedItemIds = new Set(Array.from(targetInventoryByCanonical.values()).map(item => Number(item.id)));
         const deleteCandidates = currentInventoryItems.filter(item => {
-            if (usedInventoryIds.has(Number(item.id))) return false;
-            if (item.food_item_id && usedFoodItemIds.has(Number(item.food_item_id))) return false;
-            if (getInventoryStockTotal(item) > 0) return false;
-            if (deleteAllZeroStock) return true;
+            if (usedItemIds.has(Number(item.id))) return false;
+            if (deleteAllZeroStock) return getInventoryStockTotal(item) <= 0;
             return isRecipeGeneratedWithoutStock(item);
         });
-
         for (const item of deleteCandidates) {
             const targetOverrideId = overrideMaps.deleteByInventoryId.get(Number(item.id));
             if (targetOverrideId) {
@@ -2262,12 +2261,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
         }
 
         await run("COMMIT");
-        return {
-            created_items: createdItems,
-            linked_ingredients: linkedIngredients,
-            preserved_ingredients: preservedIngredients,
-            deleted_items: deletedItems
-        };
+        return { created_items: createdItems, renamed_items: renamedItems, linked_ingredients: linkedIngredients, deleted_items: deletedItems };
     } catch (error) {
         await run("ROLLBACK");
         throw error;
@@ -2374,60 +2368,6 @@ async function buildInventoryCleanupPreview() {
     };
 }
 
-
-
-app.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
-    try {
-        const foodItemId = Number.parseInt(req.params.foodItemId, 10);
-        if (!Number.isInteger(foodItemId) || foodItemId <= 0) {
-            return res.status(400).json({ error: "Gültige food_item_id ist erforderlich." });
-        }
-
-        const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
-        if (!foodItem) return res.status(404).json({ error: "Lebensmittel-Stammsatz nicht gefunden." });
-
-        const rows = await all(`
-            SELECT
-                r.*,
-                ri.id AS ingredient_link_id,
-                ri.raw_text AS ingredient_raw_text,
-                ri.food_name AS ingredient_food_name,
-                ri.amount AS ingredient_amount,
-                ri.unit AS ingredient_unit,
-                ri.sort_order AS ingredient_sort_order
-            FROM recipe_ingredients ri
-            INNER JOIN recipes r ON r.id = ri.recipe_id
-            WHERE ri.food_item_id = ?
-            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
-        `, [foodItemId]);
-
-        const recipeMap = new Map();
-        for (const row of rows) {
-            if (!recipeMap.has(row.id)) {
-                recipeMap.set(row.id, {
-                    ...normalizeRecipeRow(row),
-                    matched_ingredients: []
-                });
-            }
-            recipeMap.get(row.id).matched_ingredients.push({
-                id: row.ingredient_link_id,
-                raw_text: row.ingredient_raw_text || row.ingredient_food_name || "",
-                food_name: row.ingredient_food_name || foodItem.display_name || "",
-                amount: row.ingredient_amount,
-                unit: row.ingredient_unit || ""
-            });
-        }
-
-        res.json({
-            food_item_id: foodItemId,
-            food_item: normalizeFoodItemRow(foodItem),
-            recipes: Array.from(recipeMap.values())
-        });
-    } catch (error) {
-        console.error("Fehler bei GET /recipes/by-food-item/:foodItemId:", error.message);
-        res.status(500).json({ error: "Rezepte zum Lebensmittel konnten nicht geladen werden" });
-    }
-});
 
 app.get("/recipes/by-ingredient/:name", async (req, res) => {
     try {
