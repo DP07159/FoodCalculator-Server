@@ -2404,6 +2404,224 @@ app.post("/admin/recipe-resync-apply", async (req, res) => {
         res.status(500).json({ error: error.message || "Rezept-Zutaten konnten nicht neu aufgebaut werden." });
     }
 });
+const ADMIN_TABLES = [
+    "recipes",
+    "recipe_ingredients",
+    "food_items",
+    "food_aliases",
+    "inventory_items",
+    "inventory_batches",
+    "health_factors",
+    "food_item_health_factors",
+    "meal_plans",
+    "admin_recipe_resync_overrides",
+    "admin_ignored_duplicate_pairs"
+];
+
+function clampAdminLimit(value) {
+    const limit = Number(value || 500);
+    if (!Number.isFinite(limit)) return 500;
+    return Math.max(10, Math.min(5000, Math.floor(limit)));
+}
+
+function assertAdminTableName(tableName) {
+    const name = String(tableName || "").trim();
+    if (!ADMIN_TABLES.includes(name)) throw new Error("Ungültiger oder nicht freigegebener Tabellenname.");
+    return name;
+}
+
+async function safeCount(sql, params = []) {
+    try {
+        const row = await get(sql, params);
+        return Number(row?.count || 0);
+    } catch (error) {
+        console.warn("Admin count failed:", error.message, sql);
+        return 0;
+    }
+}
+
+async function getAdminTableCount(tableName) {
+    const table = assertAdminTableName(tableName);
+    return safeCount(`SELECT COUNT(*) AS count FROM ${table}`);
+}
+
+async function buildAdminSystemStatus() {
+    const tables = [];
+    for (const table of ADMIN_TABLES) {
+        tables.push({ name: table, count: await getAdminTableCount(table) });
+    }
+
+    const counts = {
+        recipes: await safeCount(`SELECT COUNT(*) AS count FROM recipes`),
+        recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients`),
+        linked_recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NOT NULL`),
+        unlinked_recipe_ingredients: await safeCount(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE food_item_id IS NULL`),
+        inventory_items: await safeCount(`SELECT COUNT(*) AS count FROM inventory_items`),
+        inventory_items_with_stock: await safeCount(`
+            SELECT COUNT(*) AS count
+            FROM (
+                SELECT ii.id
+                FROM inventory_items ii
+                LEFT JOIN inventory_batches ib ON ib.item_id = ii.id
+                GROUP BY ii.id
+                HAVING COALESCE(SUM(COALESCE(ib.remaining_quantity, 0) + COALESCE(ib.remaining_weight, 0)), 0)
+                       + COALESCE(ii.quantity, 0) + COALESCE(ii.weight, 0) > 0
+            ) stocked
+        `),
+        food_items: await safeCount(`SELECT COUNT(*) AS count FROM food_items`),
+        food_aliases: await safeCount(`SELECT COUNT(*) AS count FROM food_aliases`),
+        health_factors: await safeCount(`SELECT COUNT(*) AS count FROM health_factors`)
+    };
+
+    return {
+        generated_at: new Date().toISOString(),
+        database_path: dbPath,
+        counts,
+        tables
+    };
+}
+
+async function getAdminTablePreview(tableName, requestedLimit = 500) {
+    const table = assertAdminTableName(tableName);
+    const limit = clampAdminLimit(requestedLimit);
+    const totalRow = await get(`SELECT COUNT(*) AS count FROM ${table}`);
+    const totalCount = Number(totalRow?.count || 0);
+    let rows = [];
+    let columns = [];
+
+    if (table === "food_items") {
+        rows = await all(`
+            SELECT
+                fi.id,
+                fi.display_name,
+                fi.canonical_key,
+                fi.calories_per_100g,
+                COUNT(DISTINCT fa.id) AS alias_count,
+                COUNT(DISTINCT ri.id) AS recipe_count,
+                COUNT(DISTINCT ii.id) AS inventory_count,
+                GROUP_CONCAT(DISTINCT hf.name) AS health_factors,
+                fi.created_at,
+                fi.updated_at
+            FROM food_items fi
+            LEFT JOIN food_aliases fa ON fa.food_item_id = fi.id
+            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = fi.id
+            LEFT JOIN inventory_items ii ON ii.food_item_id = fi.id
+            LEFT JOIN food_item_health_factors fihf ON fihf.food_item_id = fi.id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
+            GROUP BY fi.id
+            ORDER BY fi.display_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [limit]);
+        columns = ["id", "display_name", "canonical_key", "calories_per_100g", "alias_count", "recipe_count", "inventory_count", "health_factors", "created_at", "updated_at"];
+    } else if (table === "food_aliases") {
+        rows = await all(`
+            SELECT
+                fa.id,
+                fa.alias_name,
+                fa.alias_key,
+                fa.food_item_id,
+                fi.display_name AS target_food_item,
+                fa.created_at
+            FROM food_aliases fa
+            LEFT JOIN food_items fi ON fi.id = fa.food_item_id
+            ORDER BY fa.alias_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [limit]);
+        columns = ["id", "alias_name", "alias_key", "food_item_id", "target_food_item", "created_at"];
+    } else if (table === "recipe_ingredients") {
+        rows = await all(`
+            SELECT
+                ri.id,
+                ri.recipe_id,
+                r.name AS recipe_name,
+                ri.sort_order,
+                ri.raw_text,
+                ri.food_name,
+                ri.amount,
+                ri.unit,
+                ri.food_item_id,
+                fi.display_name AS linked_food_item,
+                ri.canonical_key,
+                ri.link_source,
+                ri.created_at,
+                ri.updated_at
+            FROM recipe_ingredients ri
+            LEFT JOIN recipes r ON r.id = ri.recipe_id
+            LEFT JOIN food_items fi ON fi.id = ri.food_item_id
+            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
+            LIMIT ?
+        `, [limit]);
+        columns = ["id", "recipe_id", "recipe_name", "sort_order", "raw_text", "food_name", "amount", "unit", "food_item_id", "linked_food_item", "canonical_key", "link_source", "created_at", "updated_at"];
+    } else if (table === "inventory_items") {
+        rows = await all(`
+            SELECT
+                ii.id,
+                ii.name AS legacy_name,
+                COALESCE(NULLIF(fi.display_name, ''), ii.name) AS display_name,
+                ii.food_item_id,
+                fi.canonical_key AS food_canonical_key,
+                ii.canonical_name,
+                ii.unit,
+                ii.calories_per_100g,
+                COUNT(DISTINCT ri.id) AS recipe_count,
+                COALESCE(SUM(COALESCE(ib.remaining_quantity, 0) + COALESCE(ib.remaining_weight, 0)), 0) AS stock_total,
+                ii.created_at,
+                ii.updated_at
+            FROM inventory_items ii
+            LEFT JOIN food_items fi ON fi.id = ii.food_item_id
+            LEFT JOIN recipe_ingredients ri ON ri.food_item_id = ii.food_item_id
+            LEFT JOIN inventory_batches ib ON ib.item_id = ii.id
+            GROUP BY ii.id
+            ORDER BY display_name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [limit]);
+        columns = ["id", "display_name", "legacy_name", "food_item_id", "food_canonical_key", "canonical_name", "unit", "calories_per_100g", "recipe_count", "stock_total", "created_at", "updated_at"];
+    } else if (table === "food_item_health_factors") {
+        rows = await all(`
+            SELECT
+                fihf.id,
+                fihf.food_item_id,
+                fi.display_name AS food_item,
+                fihf.health_factor_id,
+                hf.name AS health_factor,
+                hf.category,
+                fihf.notes,
+                fihf.created_at
+            FROM food_item_health_factors fihf
+            LEFT JOIN food_items fi ON fi.id = fihf.food_item_id
+            LEFT JOIN health_factors hf ON hf.id = fihf.health_factor_id
+            ORDER BY fi.display_name COLLATE NOCASE ASC, hf.name COLLATE NOCASE ASC
+            LIMIT ?
+        `, [limit]);
+        columns = ["id", "food_item_id", "food_item", "health_factor_id", "health_factor", "category", "notes", "created_at"];
+    } else {
+        rows = await all(`SELECT * FROM ${table} ORDER BY id DESC LIMIT ?`, [limit]);
+        if (rows.length) columns = Object.keys(rows[0]);
+        else {
+            const info = await all(`PRAGMA table_info(${table})`);
+            columns = info.map(column => column.name);
+        }
+    }
+
+    return { table, columns, rows, total_count: totalCount, limit };
+}
+
+async function buildFullJsonBackup() {
+    const backup = {
+        generated_at: new Date().toISOString(),
+        database_path: dbPath,
+        tables: {}
+    };
+    for (const table of ADMIN_TABLES) {
+        try {
+            backup.tables[table] = await all(`SELECT * FROM ${table}`);
+        } catch (error) {
+            backup.tables[table] = { error: error.message };
+        }
+    }
+    return backup;
+}
+
 
 
 
