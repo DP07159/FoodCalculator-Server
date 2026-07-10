@@ -2226,7 +2226,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
             }
         }
 
-        // Nach der Analyse dürfen nur ungenutzte, bestandslose Altlasten als Kandidaten markiert werden.
+        // Nach dem Neuaufbau dürfen nur ungenutzte, bestandslose Altlasten entfernt werden.
         // Alles, was aktuell über recipe_ingredients.food_item_id verknüpft ist, bleibt geschützt.
         const linkedFoodRows = await all(`SELECT DISTINCT food_item_id FROM recipe_ingredients WHERE food_item_id IS NOT NULL`);
         for (const row of linkedFoodRows) usedFoodItemIds.add(Number(row.food_item_id));
@@ -3397,7 +3397,7 @@ app.get("/admin/recipe-resync-preview", async (req, res) => {
 
 app.post("/admin/recipe-resync-apply", async (req, res) => {
     res.status(410).json({
-        error: "Diese automatische Admin-Aktion wurde deaktiviert. Bitte nutze die Admin-Vorschau nur noch zur Analyse."
+        error: "Die Rezept-Zutaten-Synchronisierung wurde deaktiviert. Bitte nutze die Admin-Vorschau nur noch zur Analyse."
     });
 });
 
