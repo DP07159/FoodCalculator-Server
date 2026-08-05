@@ -1,6 +1,7 @@
 const app = require("./src/app");
 const { db, dbPath, run, get, all } = require("./src/database/database");
 const { addColumnIfMissing } = require("./src/database/schema");
+const { backfillInventoryBatchDefaults } = require("./src/database/inventoryMigrations");
 
 const PORT = process.env.PORT || 3000;
 
@@ -1334,13 +1335,6 @@ async function createInventoryLooseAmount(itemId, { amount, measureUnit, expiry_
         );
     }
     await recalculateInventoryItem(itemId);
-}
-
-async function backfillInventoryBatchDefaults() {
-    // Repariert Datensätze aus Zwischenständen, in denen neue Spalten zwar ergänzt wurden,
-    // aber alte Zeilen noch NULL-Werte enthalten.
-    await run(`UPDATE inventory_items SET quantity = COALESCE(quantity, 0), unit = COALESCE(NULLIF(unit, ''), 'g'), weight = COALESCE(weight, 0), expiry_date = COALESCE(expiry_date, ''), storage_location = COALESCE(storage_location, ''), notes = COALESCE(notes, '')`);
-    await run(`UPDATE inventory_batches SET batch_type = COALESCE(NULLIF(batch_type, ''), 'package'), unit_label = COALESCE(unit_label, ''), measure_unit = COALESCE(NULLIF(measure_unit, ''), 'g'), original_quantity = COALESCE(original_quantity, 0), unit_weight = COALESCE(unit_weight, 0), remaining_quantity = COALESCE(remaining_quantity, 0), remaining_weight = COALESCE(remaining_weight, 0), expiry_date = COALESCE(expiry_date, ''), storage_location = COALESCE(storage_location, ''), notes = COALESCE(notes, '')`);
 }
 
 async function migrateInventoryBatches() {
