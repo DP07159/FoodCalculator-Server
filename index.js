@@ -1,13 +1,7 @@
-const express = require("express");
-const cors = require("cors");
-
+const app = require("./src/app");
 const { db, dbPath, run, get, all } = require("./src/database/database");
 
-const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
 
 async function addColumnIfMissing(tableName, columnName, definition) {
     const columns = await all(`PRAGMA table_info(${tableName})`);
