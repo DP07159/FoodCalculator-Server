@@ -949,14 +949,7 @@ function normalizeFoodItemRow(row) {
 }
 
 async function addFoodAlias(foodItemId, aliasName) {
-    const alias = normalizeName(aliasName);
-    if (!foodItemId || !alias) return;
-    const aliasKey = buildFoodIdentity(alias).canonical_key || canonicalizeIngredientName(alias);
-    if (!aliasKey) return;
-    await run(
-        `INSERT OR IGNORE INTO food_aliases (food_item_id, alias_name, alias_key) VALUES (?, ?, ?)`,
-        [foodItemId, alias, aliasKey]
-    );
+    return foodItemService.addFoodAlias(foodItemId, aliasName);
 }
 
 async function renameFoodItemStable(foodItemId, displayName, { calories_per_100g = undefined, updateCanonical = true } = {}) {
