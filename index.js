@@ -233,22 +233,6 @@ function parseMealTypes(value) {
     }
 }
 
-function normalizeIngredientText(value) {
-    return String(value || "")
-        .replace(/^[-•*]\s*/, "")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
-function normalizeVisibleFoodName(value) {
-    return String(value || "")
-        .replace(/^[-•*]\s*/, "")
-        .replace(/\([^)]*\)/g, " ")
-        .replace(/[,;:/]+\s*$/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
 const FOOD_BASE_ALIASES = new Map([
     ["thunfischstuecke", "thunfisch"], ["thunfischstucke", "thunfisch"], ["thunfischfilet", "thunfisch"], ["thunfischfilets", "thunfisch"], ["tunfisch", "thunfisch"],
     ["paprikaschote", "paprika"], ["paprikaschoten", "paprika"],
