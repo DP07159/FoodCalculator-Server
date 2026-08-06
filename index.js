@@ -14,6 +14,13 @@ const normalizeVisibleFoodName = ingredients.normalizeVisibleFoodName;
 const normalizeGermanText = ingredients.normalizeGermanText;
 const removeIngredientDescriptors = ingredients.removeIngredientDescriptors;
 
+const singularizeFoodToken = ingredients.singularizeFoodToken;
+const titleCaseFoodToken = ingredients.titleCaseFoodToken;
+const buildFoodIdentity = ingredients.buildFoodIdentity;
+const canonicalizeIngredientName = ingredients.canonicalizeIngredientName;
+const displayIngredientNameFromCanonical =
+    ingredients.displayIngredientNameFromCanonical;
+
 const PORT = process.env.PORT || 3000;
 
 async function ensureSchema() {
