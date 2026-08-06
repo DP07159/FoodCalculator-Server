@@ -307,14 +307,6 @@ function buildFoodIdentity(value) {
         .replace(/-/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-
-    function canonicalizeIngredientName(value) {
-    return buildFoodIdentity(value).canonical_key;
-}
-
-function displayIngredientNameFromCanonical(value, fallback) {
-    return normalizeVisibleFoodName(fallback || value);
-}
     
     const tokens = raw.split(" ").filter(Boolean).filter(token => {
         if (/^\d/.test(token)) return false;
@@ -350,6 +342,10 @@ function displayIngredientNameFromCanonical(value, fallback) {
         // Schreibweise mehr sein. Sichtbare Namen bleiben User-/Rezepttext.
         display_name: normalizeVisibleFoodName(value)
     };
+}
+
+function canonicalizeIngredientName(value) {
+    return buildFoodIdentity(value).canonical_key;
 }
 
 function displayIngredientNameFromCanonical(value, fallback) {
