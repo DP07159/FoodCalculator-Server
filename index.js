@@ -3,6 +3,7 @@ const { db, dbPath, run, get, all } = require("./src/database/database");
 const { addColumnIfMissing } = require("./src/database/schema");
 const { backfillInventoryBatchDefaults } = require("./src/database/inventoryMigrations");
 const ingredients = require("./src/shared/ingredients");
+const foodItemService = require("./src/modules/foodItems/service");
 
 const parseFraction = ingredients.parseFraction;
 const normalizeIngredientUnit = ingredients.normalizeIngredientUnit;
