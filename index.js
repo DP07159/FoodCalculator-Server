@@ -270,27 +270,6 @@ const FOOD_VARIANT_DISPLAY = {
 const UNIT_TOKEN_SET = new Set(["kg", "g", "gr", "gramm", "ml", "cl", "dl", "l", "liter", "milliliter", "zentiliter", "deziliter", "stk", "stueck", "stuck", "dose", "dosen", "glas", "glaeser", "gläser", "packung", "packungen", "pkg", "cup", "cups", "tasse", "tassen", "el", "essloeffel", "esslöffel", "tl", "teeloeffel", "teelöffel", "tbsp", "tsp", "prise", "prisen", "spritzer", "schuss", "schuesse", "schüsse"]);
 const FILLER_TOKEN_SET = new Set(["a", "à", "je", "pro", "ca", "circa", "etwa", "und", "oder", "mit", "in", "aus", "von", "fuer", "fur"]);
 
-function normalizeGermanText(value) {
-    return String(value || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/ß/g, "ss")
-        .replace(/ä/g, "ae")
-        .replace(/ö/g, "oe")
-        .replace(/ü/g, "ue");
-}
-
-function removeIngredientDescriptors(value) {
-    return String(value || "")
-        .replace(/\([^)]*\)/g, " ")
-        .replace(/\b(?:in|mit)\s+(?:eigenem\s+saft|saft|wasser|oel|öl|lake|tomatensauce)\b/gi, " ")
-        .replace(/\b(?:abgetropft|abtropfgewicht|netto|einwaage|fuellmenge|füllmenge|natur|naturell|frisch|frische|frischer|frisches|getrocknet|gekocht|vorgekocht|roh|gehackt|geschnitten|gewuerfelt|gewürfelt|gerieben|optional|ca|circa|etwa|nach\s+geschmack)\b/gi, " ")
-        .replace(/[,;:/]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
 function singularizeFoodToken(token) {
     let word = String(token || "").trim();
     if (!word || word.length <= 4) return word;
