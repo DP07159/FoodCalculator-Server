@@ -1474,17 +1474,6 @@ function hasExplicitIngredientLinksPayload(payload) {
     return Object.prototype.hasOwnProperty.call(payload || {}, "ingredientLinks") && Array.isArray(payload.ingredientLinks);
 }
 
-app.get("/recipes/:id", async (req, res) => {
-    try {
-        const row = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        if (!row) return res.status(404).json({ error: "Rezept nicht gefunden" });
-        res.json(await normalizeRecipeRowWithIngredientLinks(row));
-    } catch (error) {
-        console.error("Fehler bei GET /recipes/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Laden des Rezepts" });
-    }
-});
-
 app.post("/recipes", async (req, res) => {
     try {
         const validation = validateRecipePayload(req.body);
