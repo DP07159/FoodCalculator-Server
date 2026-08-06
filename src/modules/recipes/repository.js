@@ -91,9 +91,30 @@ async function deleteById(recipeId) {
     );
 }
 
+async function findIngredientLinks(recipeId) {
+    return all(
+        `SELECT
+            ri.sort_order AS line_index,
+            ri.raw_text,
+            ri.food_name,
+            ri.amount,
+            ri.unit,
+            ri.food_item_id,
+            ri.link_source,
+            fi.display_name AS food_display_name
+         FROM recipe_ingredients ri
+         LEFT JOIN food_items fi
+            ON fi.id = ri.food_item_id
+         WHERE ri.recipe_id = ?
+         ORDER BY ri.sort_order ASC`,
+        [recipeId]
+    );
+}
+
 module.exports = {
     findAll,
     findById,
+    findIngredientLinks,
     create,
     update,
     updateFavorite,
