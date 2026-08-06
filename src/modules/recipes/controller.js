@@ -31,7 +31,60 @@ async function getRecipeById(req, res) {
     }
 }
 
+async function updateRecipeFavorite(req, res) {
+    try {
+        const result = await recipeService.updateRecipeFavorite(
+            req.params.id,
+            req.body.is_favorite
+        );
+
+        if (!result) {
+            return res.status(404).json({
+                error: "Rezept nicht gefunden"
+            });
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error(
+            "Fehler bei PATCH /recipes/:id/favorite:",
+            error.message
+        );
+
+        res.status(500).json({
+            error: "Fehler beim Aktualisieren des Favoritenstatus"
+        });
+    }
+}
+
+async function deleteRecipe(req, res) {
+    try {
+        const deleted = await recipeService.deleteRecipe(req.params.id);
+
+        if (!deleted) {
+            return res.status(404).json({
+                error: "Rezept nicht gefunden"
+            });
+        }
+
+        res.json({
+            success: true
+        });
+    } catch (error) {
+        console.error(
+            "Fehler bei DELETE /recipes/:id:",
+            error.message
+        );
+
+        res.status(500).json({
+            error: "Fehler beim Löschen des Rezepts"
+        });
+    }
+}
+
 module.exports = {
     getAllRecipes,
-    getRecipeById
+    getRecipeById,
+    updateRecipeFavorite,
+    deleteRecipe
 };
