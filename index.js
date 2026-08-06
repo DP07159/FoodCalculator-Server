@@ -2,6 +2,27 @@ const app = require("./src/app");
 const { db, dbPath, run, get, all } = require("./src/database/database");
 const { addColumnIfMissing } = require("./src/database/schema");
 const { backfillInventoryBatchDefaults } = require("./src/database/inventoryMigrations");
+const {
+    parseFraction,
+    normalizeIngredientUnit,
+    unitForInventory,
+    convertIngredientAmount,
+    normalizeIngredientText,
+    normalizeVisibleFoodName,
+    normalizeGermanText,
+    removeIngredientDescriptors,
+    singularizeFoodToken,
+    titleCaseFoodToken,
+    buildFoodIdentity,
+    canonicalizeIngredientName,
+    displayIngredientNameFromCanonical,
+    cleanIngredientName,
+    findAmountUnitMatches,
+    getContainerMultiplier,
+    findAmountUnitInIngredient,
+    parseIngredientLine,
+    parseIngredientsText
+} = require("./src/shared/ingredients");
 
 const PORT = process.env.PORT || 3000;
 
