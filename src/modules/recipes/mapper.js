@@ -23,7 +23,24 @@ function normalizeRecipeRow(recipe) {
     };
 }
 
+function normalizeIngredientLinks(rows = []) {
+    return rows.map(row => ({
+        line_index: Number(row.line_index) || 0,
+        raw_text: row.raw_text || "",
+        food_name: row.food_display_name || row.food_name || "",
+        stored_food_name: row.food_name || "",
+        amount:
+            row.amount === null || row.amount === undefined
+                ? null
+                : Number(row.amount),
+        unit: row.unit || "",
+        food_item_id: row.food_item_id || null,
+        link_source: row.link_source || ""
+    }));
+}
+
 module.exports = {
     parseMealTypes,
-    normalizeRecipeRow
+    normalizeRecipeRow,
+    normalizeIngredientLinks
 };
