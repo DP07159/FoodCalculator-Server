@@ -1003,28 +1003,8 @@ async function renameFoodItemStable(foodItemId, displayName, { calories_per_100g
     return get(`SELECT * FROM food_items WHERE id = ?`, [id]);
 }
 
-async function getOrCreateFoodItem(name, { calories_per_100g = null, aliasName = "" } = {}) {
-    const identity = buildFoodIdentity(name);
-    const canonicalKey = identity.canonical_key || canonicalizeIngredientName(name);
-    const displayName = normalizeVisibleFoodName(name);
-    if (!canonicalKey || !displayName) throw new Error("Lebensmittel konnte nicht normalisiert werden.");
-
-    let foodItem = await get(`SELECT * FROM food_items WHERE canonical_key = ? LIMIT 1`, [canonicalKey]);
-    if (!foodItem) {
-        const result = await run(
-            `INSERT INTO food_items (display_name, canonical_key, calories_per_100g) VALUES (?, ?, ?)`,
-            [displayName, canonicalKey, calories_per_100g]
-        );
-        foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [result.lastID]);
-    } else if ((foodItem.calories_per_100g === null || foodItem.calories_per_100g === undefined) && calories_per_100g !== null && calories_per_100g !== undefined) {
-        await run(`UPDATE food_items SET calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [calories_per_100g, foodItem.id]);
-        foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItem.id]);
-    }
-
-    await addFoodAlias(foodItem.id, displayName);
-    await addFoodAlias(foodItem.id, name);
-    if (aliasName) await addFoodAlias(foodItem.id, aliasName);
-    return foodItem;
+async function getOrCreateFoodItem(name, options = {}) {
+    return foodItemService.getOrCreateFoodItem(name, options);
 }
 
 async function findFoodItemByName(name) {
