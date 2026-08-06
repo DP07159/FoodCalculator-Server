@@ -351,10 +351,6 @@ function buildFoodIdentity(value) {
     };
 }
 
-function canonicalizeIngredientName(value) {
-    return buildFoodIdentity(value).canonical_key;
-}
-
 function displayIngredientNameFromCanonical(value, fallback) {
     return normalizeVisibleFoodName(fallback || value);
 }
