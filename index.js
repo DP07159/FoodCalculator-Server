@@ -1553,33 +1553,6 @@ app.put("/recipes/:id", async (req, res) => {
     }
 });
 
-app.patch("/recipes/:id/favorite", async (req, res) => {
-    try {
-        const favoriteValue = Number(req.body.is_favorite) === 1 ? 1 : 0;
-        const result = await run(
-            `UPDATE recipes SET is_favorite = ? WHERE id = ?`,
-            [favoriteValue, req.params.id]
-        );
-        if (result.changes === 0) return res.status(404).json({ error: "Rezept nicht gefunden" });
-        res.json({ id: Number(req.params.id), is_favorite: favoriteValue });
-    } catch (error) {
-        console.error("Fehler bei PATCH /recipes/:id/favorite:", error.message);
-        res.status(500).json({ error: "Fehler beim Aktualisieren des Favoritenstatus" });
-    }
-});
-
-app.delete("/recipes/:id", async (req, res) => {
-    try {
-        await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [req.params.id]);
-        const result = await run(`DELETE FROM recipes WHERE id = ?`, [req.params.id]);
-        if (result.changes === 0) return res.status(404).json({ error: "Rezept nicht gefunden" });
-        res.json({ success: true });
-    } catch (error) {
-        console.error("Fehler bei DELETE /recipes/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Löschen des Rezepts" });
-    }
-});
-
 app.get("/meal_plans", async (req, res) => {
     try {
         const rows = await all(`SELECT * FROM meal_plans ORDER BY id DESC`);
