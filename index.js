@@ -315,6 +315,14 @@ function buildFoodIdentity(value) {
         .replace(/\s+/g, " ")
         .trim();
 
+    function canonicalizeIngredientName(value) {
+    return buildFoodIdentity(value).canonical_key;
+}
+
+function displayIngredientNameFromCanonical(value, fallback) {
+    return normalizeVisibleFoodName(fallback || value);
+}
+    
     const tokens = raw.split(" ").filter(Boolean).filter(token => {
         if (/^\d/.test(token)) return false;
         if (UNIT_TOKEN_SET.has(token)) return false;
