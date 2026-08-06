@@ -1,7 +1,8 @@
 const recipeRepository = require("./repository");
 const {
     parseMealTypes,
-    normalizeRecipeRow
+    normalizeRecipeRow,
+    normalizeIngredientLinks
 } = require("./mapper");
 const {
     validateRecipePayload
@@ -26,6 +27,15 @@ function hasExplicitIngredientLinksPayload(payload) {
     );
 }
 
+async function mapRecipeWithIngredientLinks(recipe) {
+    const rows = await recipeRepository.findIngredientLinks(recipe.id);
+
+    return {
+        ...normalizeRecipeRow(recipe),
+        ingredientLinks: normalizeIngredientLinks(rows)
+    };
+}
+
 async function getAllRecipes() {
     const rows = await recipeRepository.findAll();
     return rows.map(normalizeRecipeRow);
@@ -38,7 +48,7 @@ async function getRecipeById(recipeId) {
         return null;
     }
 
-    return normalizeRecipeRow(recipe);
+    return mapRecipeWithIngredientLinks(recipe);
 }
 
 async function createRecipe(payload) {
@@ -53,7 +63,7 @@ async function createRecipe(payload) {
     const recipe = await recipeRepository.create(validation.value);
 
     return {
-        value: normalizeRecipeRow(recipe),
+        value: await mapRecipeWithIngredientLinks(recipe),
         ingredientLinks: validation.value.ingredientLinks
     };
 }
@@ -107,7 +117,7 @@ async function updateRecipe(recipeId, payload) {
         );
 
     return {
-        value: normalizeRecipeRow(updated),
+        value: await mapRecipeWithIngredientLinks(updated),
         ingredientLinks: validation.value.ingredientLinks,
         shouldSyncIngredients:
             ingredientsChanged ||
