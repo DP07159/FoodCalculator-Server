@@ -523,10 +523,7 @@ function normalizeIngredientRawLineForMatch(value) {
 }
 
 function ingredientFoodNamesMatch(a, b) {
-    const left = canonicalizeIngredientName(a);
-    const right = canonicalizeIngredientName(b);
-    if (!left || !right) return false;
-    return left === right;
+    return ingredients.ingredientFoodNamesMatch(a, b);
 }
 
 async function getPreservedFoodItemForIngredient(previousLinks, index, ingredient) {
