@@ -614,9 +614,15 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
     await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipeId]);
     const parsedIngredients = parseIngredientsText(ingredientsText);
 
-    for (const [index, ingredient] of parsedIngredients.entries()) {
+   for (const ingredient of parsedIngredients) {
+        const index = ingredient.line_index;
+       
         let linkSource = "new_from_recipe";
-        let foodItem = await getSelectedFoodItemForIngredient(explicitLinks, index, ingredient.raw_text);
+        let foodItem = await getSelectedFoodItemForIngredient(
+            explicitLinks, 
+            index, 
+            ingredient.raw_text
+        );
 
         if (foodItem) {
             linkSource = "user_selected";
