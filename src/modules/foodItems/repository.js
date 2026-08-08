@@ -176,10 +176,23 @@ async function updateLinkedRecipeIngredients({
     );
 }
 
+async function existsByCanonicalKey(canonicalKey) {
+    const row = await get(
+        `SELECT id
+         FROM food_items
+         WHERE canonical_key = ?
+         LIMIT 1`,
+        [canonicalKey]
+    );
+
+    return Boolean(row);
+}
+
 module.exports = {
     findById,
     findByCanonicalKey,
     findByAliasKey,
+    existsByCanonicalKey,
     create,
     update,
     updateCalories,
