@@ -862,6 +862,7 @@ function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
     const comparison = compareRecipeIngredientWithStock(item, improved, required);
 
     return {
+        line_index: parsedIngredient?.line_index ?? null,
         raw_text: improved?.raw_text || "",
         display_text: scaleIngredientLineForPortions(improved?.raw_text || "", factor),
         food_name: improved?.food_name || "",
