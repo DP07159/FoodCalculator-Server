@@ -488,28 +488,11 @@ function parseIngredientsText(ingredientsText) {
         .filter(Boolean);
 }
 
-async function createDistinctFoodItemFromIngredient(name, { calories_per_100g = null, aliasName = "" } = {}) {
-    const identity = buildFoodIdentity(name);
-    const baseCanonicalKey = identity.canonical_key || canonicalizeIngredientName(name);
-    const displayName = normalizeVisibleFoodName(name);
-    if (!baseCanonicalKey || !displayName) throw new Error("Lebensmittel konnte nicht normalisiert werden.");
-
-    let canonicalKey = baseCanonicalKey;
-    let counter = 1;
-    while (await get(`SELECT id FROM food_items WHERE canonical_key = ? LIMIT 1`, [canonicalKey])) {
-        counter += 1;
-        canonicalKey = `${baseCanonicalKey}__recipe_${Date.now()}_${counter}`;
-    }
-
-    const result = await run(
-        `INSERT INTO food_items (display_name, canonical_key, calories_per_100g) VALUES (?, ?, ?)`,
-        [displayName, canonicalKey, calories_per_100g]
+async function createDistinctFoodItemFromIngredient(name, options = {}) {
+    return foodItemService.createDistinctFoodItemFromIngredient(
+        name,
+        options
     );
-    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [result.lastID]);
-    await addFoodAlias(foodItem.id, displayName);
-    await addFoodAlias(foodItem.id, name);
-    if (aliasName) await addFoodAlias(foodItem.id, aliasName);
-    return foodItem;
 }
 
 async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
