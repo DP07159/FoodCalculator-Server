@@ -2273,6 +2273,7 @@ app.get("/recipes/:id/stock-check", async (req, res) => {
 
         const parsedIngredients = linkedIngredients.length
             ? linkedIngredients.map(row => ({
+                line_index: Number(row.sort_order),
                 raw_text: row.raw_text || "",
                 food_name: row.food_display_name || row.food_name || "",
                 amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
