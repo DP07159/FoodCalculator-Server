@@ -859,13 +859,6 @@ async function getInventoryItemWithFoodName(itemId) {
     `, [itemId]);
 }
 
-function ingredientMatchesName(ingredientName, searchName) {
-    return ingredients.ingredientMatchesName(
-        ingredientName,
-        searchName
-    );
-}
-
 function normalizeRecipeRow(recipe) {
     return {
         id: recipe.id,
