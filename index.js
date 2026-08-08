@@ -679,9 +679,7 @@ function singularizeComparableName(value) {
 }
 
 function getComparableNameVariants(value) {
-    const normalized = normalizeComparableName(value);
-    const singular = singularizeComparableName(normalized);
-    return Array.from(new Set([normalized, singular].filter(Boolean)));
+    return ingredients.getComparableNameVariants(value);
 }
 
 function comparableNamesMatch(a, b) {
