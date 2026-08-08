@@ -519,11 +519,7 @@ async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
 }
 
 function normalizeIngredientRawLineForMatch(value) {
-    return String(value || "")
-        .toLowerCase()
-        .replace(/\r/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+    return ingredients.normalizeIngredientRawLineForMatch(value);
 }
 
 function ingredientFoodNamesMatch(a, b) {
