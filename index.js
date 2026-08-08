@@ -675,12 +675,7 @@ function normalizeComparableName(value) {
 }
 
 function singularizeComparableName(value) {
-    let text = normalizeComparableName(value);
-    if (text.length <= 3) return text;
-    text = text.replace(/\b(\w+)(chen|lein)\b/g, "$1$2");
-    text = text.replace(/\b(\w+?)(innen|ungen|keiten|heiten)\b/g, "$1");
-    text = text.replace(/\b(\w+?)(en|er|n|e|s)\b/g, (match, stem) => stem.length >= 3 ? stem : match);
-    return text.replace(/\s+/g, " ").trim();
+    return ingredients.singularizeComparableName(value);
 }
 
 function getComparableNameVariants(value) {
