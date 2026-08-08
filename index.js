@@ -952,55 +952,12 @@ async function addFoodAlias(foodItemId, aliasName) {
     return foodItemService.addFoodAlias(foodItemId, aliasName);
 }
 
-async function renameFoodItemStable(foodItemId, displayName, { calories_per_100g = undefined, updateCanonical = true } = {}) {
-    const id = Number(foodItemId);
-    const nextName = String(displayName || "").trim();
-    if (!Number.isFinite(id)) throw new Error("Ungültiger Lebensmittel-Stammsatz.");
-    if (!nextName) throw new Error("Anzeigename ist erforderlich.");
-
-    const current = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
-    if (!current) throw new Error("Lebensmittel-Stammsatz wurde nicht gefunden.");
-
-    const nextCanonical = buildFoodIdentity(nextName).canonical_key || canonicalizeIngredientName(nextName) || current.canonical_key;
-    let canonicalToStore = current.canonical_key;
-
-    if (updateCanonical && nextCanonical) {
-        const conflicting = await get(`SELECT id, display_name FROM food_items WHERE canonical_key = ? AND id <> ? LIMIT 1`, [nextCanonical, id]);
-        if (!conflicting) canonicalToStore = nextCanonical;
-    }
-
-    const calories = calories_per_100g === undefined
-        ? current.calories_per_100g
-        : (calories_per_100g === null || calories_per_100g === "" ? null : Number(calories_per_100g));
-
-    await addFoodAlias(id, current.display_name);
-    if (current.canonical_key) await addFoodAlias(id, current.canonical_key);
-    await addFoodAlias(id, nextName);
-
-    await run(
-        `UPDATE food_items
-         SET display_name = ?, canonical_key = ?, calories_per_100g = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [nextName, canonicalToStore, calories, id]
+async function renameFoodItemStable(foodItemId, displayName, options = {}) {
+    return foodItemService.renameFoodItemStable(
+        foodItemId,
+        displayName,
+        options
     );
-
-    // Legacy-Synchronisierung: food_items bleibt die Wahrheit, aber alte Inventarspalten werden mitgezogen,
-    // damit keine veralteten Fallback-Namen in älteren Frontend-/Admin-Ansichten auftauchen.
-    await run(
-        `UPDATE inventory_items
-         SET name = ?, canonical_name = ?, calories_per_100g = COALESCE(?, calories_per_100g), updated_at = CURRENT_TIMESTAMP
-         WHERE food_item_id = ?`,
-        [nextName, canonicalToStore, calories, id]
-    );
-
-    await run(
-        `UPDATE recipe_ingredients
-         SET canonical_key = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE food_item_id = ?`,
-        [canonicalToStore, id]
-    );
-
-    return get(`SELECT * FROM food_items WHERE id = ?`, [id]);
 }
 
 async function getOrCreateFoodItem(name, options = {}) {
