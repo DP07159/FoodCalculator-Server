@@ -671,7 +671,7 @@ const syncAllRecipeIngredients = backfillMissingRecipeIngredientLinks;
 
 
 function normalizeComparableName(value) {
-    return canonicalizeIngredientName(value);
+    return ingredients.normalizeComparableName(value);
 }
 
 function singularizeComparableName(value) {
