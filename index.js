@@ -484,7 +484,18 @@ function parseIngredientLine(line) {
 function parseIngredientsText(ingredientsText) {
     return String(ingredientsText || "")
         .split(/\n|\r|;/)
-        .map(parseIngredientLine)
+        .map((line, index) => {
+            const parsed = parseIngredientLine(line);
+
+            if (!parsed) {
+                return null;
+            }
+
+            return {
+                ...parsed,
+                line_index: index
+            };
+        })
         .filter(Boolean);
 }
 
