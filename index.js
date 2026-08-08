@@ -518,10 +518,6 @@ async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
     return foodItem || null;
 }
 
-function ingredientFoodNamesMatch(a, b) {
-    return ingredients.ingredientFoodNamesMatch(a, b);
-}
-
 async function getPreservedFoodItemForIngredient(previousLinks, index, ingredient) {
     const links = Array.isArray(previousLinks) ? previousLinks : [];
     const raw = ingredients.normalizeIngredientRawLineForMatch(ingredient?.raw_text);
