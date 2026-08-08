@@ -524,20 +524,20 @@ function ingredientFoodNamesMatch(a, b) {
 
 async function getPreservedFoodItemForIngredient(previousLinks, index, ingredient) {
     const links = Array.isArray(previousLinks) ? previousLinks : [];
-    const raw = normalizeIngredientRawLineForMatch(ingredient?.raw_text);
+    const raw = ingredients.normalizeIngredientRawLineForMatch(ingredient?.raw_text);
     const foodName = ingredient?.food_name || "";
 
     // 1) stärkster Fall: gleiche Zeile und identischer Text, whitespace-tolerant
     let link = links.find(entry =>
         Number(entry.sort_order) === Number(index) &&
-        normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
+        ingredients.normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
         entry.food_item_id
     );
 
     // 2) Fallback: identischer Text an anderer Stelle, falls Zeilen verschoben wurden
     if (!link && raw) {
         link = links.find(entry =>
-            normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
+            ingredients.normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
             entry.food_item_id
         );
     }
