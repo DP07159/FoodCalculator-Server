@@ -885,13 +885,10 @@ async function getInventoryItemWithFoodName(itemId) {
 }
 
 function ingredientMatchesName(ingredientName, searchName) {
-    const left = buildFoodIdentity(ingredientName).canonical_key;
-    const right = buildFoodIdentity(searchName).canonical_key;
-    if (left && right && left === right) return true;
-
-    const leftDisplay = normalizeGermanText(ingredientName).replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
-    const rightDisplay = normalizeGermanText(searchName).replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim();
-    return Boolean(leftDisplay && rightDisplay && leftDisplay === rightDisplay);
+    return ingredients.ingredientMatchesName(
+        ingredientName,
+        searchName
+    );
 }
 
 function normalizeRecipeRow(recipe) {
