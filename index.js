@@ -543,7 +543,7 @@ async function getPreservedFoodItemForIngredient(previousLinks, index, ingredien
     if (!link && foodName) {
         link = links.find(entry =>
             Number(entry.sort_order) === Number(index) &&
-            ingredientFoodNamesMatch(entry.food_name, foodName) &&
+            ingredients.ingredientFoodNamesMatch(entry.food_name, foodName) &&
             entry.food_item_id
         );
     }
@@ -551,7 +551,7 @@ async function getPreservedFoodItemForIngredient(previousLinks, index, ingredien
     // 4) Letzter sicherer Fallback: gleicher normalisierter Lebensmittelname in anderer Zeile.
     if (!link && foodName) {
         link = links.find(entry =>
-            ingredientFoodNamesMatch(entry.food_name, foodName) &&
+            ingredients.ingredientFoodNamesMatch(entry.food_name, foodName) &&
             entry.food_item_id
         );
     }
