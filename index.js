@@ -683,18 +683,7 @@ function getComparableNameVariants(value) {
 }
 
 function comparableNamesMatch(a, b) {
-    const aVariants = getComparableNameVariants(a);
-    const bVariants = getComparableNameVariants(b);
-    if (!aVariants.length || !bVariants.length) return false;
-    if (aVariants.some(value => bVariants.includes(value))) return true;
-
-    return aVariants.some(av => bVariants.some(bv => {
-        if (av.length < 3 || bv.length < 3) return false;
-        const aTokens = av.split(" ").filter(token => token.length >= 3);
-        const bTokens = bv.split(" ").filter(token => token.length >= 3);
-        if (!aTokens.length || !bTokens.length) return false;
-        return aTokens.every(token => bTokens.includes(token)) || bTokens.every(token => aTokens.includes(token));
-    }));
+    return ingredients.comparableNamesMatch(a, b);
 }
 
 function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
