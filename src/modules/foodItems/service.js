@@ -192,9 +192,61 @@ async function renameFoodItemStable(
     return updated;
 }
 
+async function createDistinctFoodItemFromIngredient(
+    name,
+    {
+        calories_per_100g = null,
+        aliasName = ""
+    } = {}
+) {
+    const identity = buildFoodIdentity(name);
+
+    const baseCanonicalKey =
+        identity.canonical_key ||
+        canonicalizeIngredientName(name);
+
+    const displayName = normalizeVisibleFoodName(name);
+
+    if (!baseCanonicalKey || !displayName) {
+        throw new Error(
+            "Lebensmittel konnte nicht normalisiert werden."
+        );
+    }
+
+    let canonicalKey = baseCanonicalKey;
+    let counter = 1;
+
+    while (
+        await foodItemRepository.existsByCanonicalKey(
+            canonicalKey
+        )
+    ) {
+        counter += 1;
+
+        canonicalKey =
+            `${baseCanonicalKey}__recipe_${Date.now()}_${counter}`;
+    }
+
+    const foodItem = await foodItemRepository.create({
+        displayName,
+        canonicalKey,
+        caloriesPer100g: calories_per_100g
+    });
+
+    await addFoodAlias(foodItem.id, displayName);
+    await addFoodAlias(foodItem.id, name);
+
+    if (aliasName) {
+        await addFoodAlias(foodItem.id, aliasName);
+    }
+
+    return foodItem;
+}
+
 module.exports = {
     addFoodAlias,
     findFoodItemByName,
     getOrCreateFoodItem,
-    renameFoodItemStable
+    renameFoodItemStable,
+    createDistinctFoodItemFromIngredient,
 };
