@@ -661,23 +661,6 @@ async function backfillMissingRecipeIngredientLinks() {
 // Kompatibilitäts-Alias für ältere interne Aufrufe.
 const syncAllRecipeIngredients = backfillMissingRecipeIngredientLinks;
 
-
-function normalizeComparableName(value) {
-    return ingredients.normalizeComparableName(value);
-}
-
-function singularizeComparableName(value) {
-    return ingredients.singularizeComparableName(value);
-}
-
-function getComparableNameVariants(value) {
-    return ingredients.getComparableNameVariants(value);
-}
-
-function comparableNamesMatch(a, b) {
-    return ingredients.comparableNamesMatch(a, b);
-}
-
 function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
     // Keine automatische Umbenennung/Zuordnung anhand ähnlicher Namen.
     // Der sichere Weg ist: expliziter Link aus recipe_ingredients oder exakter Treffer.
