@@ -965,15 +965,7 @@ async function getOrCreateFoodItem(name, options = {}) {
 }
 
 async function findFoodItemByName(name) {
-    const identity = buildFoodIdentity(name);
-    if (!identity.canonical_key) return null;
-    const direct = await get(`SELECT * FROM food_items WHERE canonical_key = ? LIMIT 1`, [identity.canonical_key]);
-    if (direct) return direct;
-    const alias = await get(
-        `SELECT fi.* FROM food_aliases fa JOIN food_items fi ON fi.id = fa.food_item_id WHERE fa.alias_key = ? LIMIT 1`,
-        [identity.canonical_key]
-    );
-    return alias || null;
+    return foodItemService.findFoodItemByName(name);
 }
 
 async function migrateFoodItems() {
