@@ -1,8 +1,11 @@
 const {
     canonicalizeIngredientName,
-    buildFoodIdentity,
+    buildFoodIdentity
+} = require("./canonicalizer");
+
+const {
     normalizeGermanText
-} = require("./index");
+} = require("./normalizer");
 
 function normalizeIngredientRawLineForMatch(value) {
     return String(value || "")
