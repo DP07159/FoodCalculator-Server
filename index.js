@@ -518,10 +518,6 @@ async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
     return foodItem || null;
 }
 
-function normalizeIngredientRawLineForMatch(value) {
-    return ingredients.normalizeIngredientRawLineForMatch(value);
-}
-
 function ingredientFoodNamesMatch(a, b) {
     return ingredients.ingredientFoodNamesMatch(a, b);
 }
