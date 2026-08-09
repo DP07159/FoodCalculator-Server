@@ -19,7 +19,11 @@ async function main() {
 
         if (Number(foreignKeys.foreign_keys) !== 1) throw new Error("Foreign Keys sind nicht aktiv.");
         if (integrity.integrity_check !== "ok") throw new Error("SQLite Integrity Check ist fehlgeschlagen.");
-        if (firstRun.appliedNow.length !== 1) throw new Error("Migration wurde beim ersten Lauf nicht genau einmal angewendet.");
+        if (firstRun.appliedNow.length !== firstRun.totalKnown) {
+            throw new Error(
+                `Beim ersten Lauf wurden ${firstRun.appliedNow.length} von ${firstRun.totalKnown} Migrationen angewendet.`
+            );
+        }
         if (secondRun.appliedNow.length !== 0) throw new Error("Migration Runner ist nicht idempotent.");
 
         console.log(JSON.stringify({ ok: true, foreignKeys: true, integrity: "ok", firstRun, secondRun, migrations }, null, 2));
