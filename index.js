@@ -1,5 +1,5 @@
 const app = require("./src/app");
-const { db, dbPath, run, get, all } = require("./src/database/database");
+const { dbPath, run, get, all } = require("./src/database/database");
 const { addColumnIfMissing } = require("./src/database/schema");
 const { backfillInventoryBatchDefaults } = require("./src/database/inventoryMigrations");
 const ingredients = require("./src/shared/ingredients");
@@ -349,10 +349,6 @@ function canonicalizeIngredientName(value) {
     return buildFoodIdentity(value).canonical_key;
 }
 
-function displayIngredientNameFromCanonical(value, fallback) {
-    return normalizeVisibleFoodName(fallback || value);
-}
-
 function cleanIngredientName(value) {
     const unitPattern = "kg|g|gr|gramm|ml|l|liter|stk\\.?|stück|stueck|dose|dosen|glas|gläser|glaeser|packung|packungen|pkg|el|esslöffel|essloeffel|tl|teelöffel|teeloeffel|prise|prisen";
     const amountPattern = "(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:[,.]\\d+)?|[¼½¾⅓⅔])";
@@ -499,12 +495,6 @@ function parseIngredientsText(ingredientsText) {
         .filter(Boolean);
 }
 
-async function createDistinctFoodItemFromIngredient(name, options = {}) {
-    return foodItemService.createDistinctFoodItemFromIngredient(
-        name,
-        options
-    );
-}
 
 async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
     const links = Array.isArray(explicitLinks) ? explicitLinks : [];
@@ -611,8 +601,8 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
 
         if (foodItem) {
             linkSource = "user_selected";
-            await addFoodAlias(foodItem.id, ingredient.raw_text);
-            await addFoodAlias(foodItem.id, ingredient.food_name);
+            await foodItemService.addFoodAlias(foodItem.id, ingredient.raw_text);
+            await foodItemService.addFoodAlias(foodItem.id, ingredient.food_name);
         } else {
             const preserved = await getPreservedFoodItemForIngredient(previousLinks, index, ingredient);
             if (preserved) {
@@ -624,7 +614,7 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
         if (!foodItem) {
             // Strikte automatische Zuordnung: nur exakter Stammdaten-/Alias-Treffer.
             // Keine Teiltreffer, keine Ähnlichkeitssuche, keine sichtbare Namenskorrektur.
-            foodItem = await findFoodItemByName(ingredient.food_name);
+            foodItem = await foodItemService.findFoodItemByName(ingredient.food_name);
             if (foodItem) {
                 linkSource = "auto_exact";
             }
@@ -632,7 +622,7 @@ async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = 
 
         if (!foodItem) {
             if (!createMissing) continue;
-            foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
+            foodItem = await foodItemService.createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
             linkSource = "new_from_recipe";
         }
 
@@ -658,20 +648,10 @@ async function backfillMissingRecipeIngredientLinks() {
     }
 }
 
-// Kompatibilitäts-Alias für ältere interne Aufrufe.
-const syncAllRecipeIngredients = backfillMissingRecipeIngredientLinks;
-
 function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
     // Keine automatische Umbenennung/Zuordnung anhand ähnlicher Namen.
     // Der sichere Weg ist: expliziter Link aus recipe_ingredients oder exakter Treffer.
     return parsedIngredient;
-}
-
-function convertAmountForDisplay(amount, originalUnit, inventoryUnit) {
-    if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) return null;
-    const unit = normalizeIngredientUnit(originalUnit || inventoryUnit);
-    if (unit === "kg" || unit === "l") return Number(amount) / 1000;
-    return Number(amount);
 }
 
 function scaleIngredientLineForPortions(rawLine, factor) {
@@ -889,35 +869,19 @@ function normalizeFoodItemRow(row) {
     };
 }
 
-async function addFoodAlias(foodItemId, aliasName) {
-    return foodItemService.addFoodAlias(foodItemId, aliasName);
-}
 
-async function renameFoodItemStable(foodItemId, displayName, options = {}) {
-    return foodItemService.renameFoodItemStable(
-        foodItemId,
-        displayName,
-        options
-    );
-}
 
-async function getOrCreateFoodItem(name, options = {}) {
-    return foodItemService.getOrCreateFoodItem(name, options);
-}
 
-async function findFoodItemByName(name) {
-    return foodItemService.findFoodItemByName(name);
-}
 
 async function migrateFoodItems() {
     const inventoryRows = await all(`SELECT * FROM inventory_items`);
     for (const row of inventoryRows) {
-        const foodItem = await getOrCreateFoodItem(row.name, { calories_per_100g: row.calories_per_100g });
+        const foodItem = await foodItemService.getOrCreateFoodItem(row.name, { calories_per_100g: row.calories_per_100g });
         await run(
             `UPDATE inventory_items SET food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
             [foodItem.id, foodItem.canonical_key, row.id]
         );
-        if (row.recipe_match_name) await addFoodAlias(foodItem.id, row.recipe_match_name);
+        if (row.recipe_match_name) await foodItemService.addFoodAlias(foodItem.id, row.recipe_match_name);
     }
 }
 
@@ -985,13 +949,6 @@ function validateInventoryPayload(payload) {
     };
 }
 
-function calculateUnitWeight(quantity, weight) {
-    const q = Number(quantity ?? 0);
-    const w = Number(weight ?? 0);
-    if (!Number.isFinite(q) || !Number.isFinite(w) || q <= 0 || w <= 0) return 0;
-    return w / q;
-}
-
 function normalizeMeasureUnit(value) {
     const unit = String(value || "g").trim();
     return unit || "g";
@@ -1045,7 +1002,7 @@ async function recalculateInventoryItem(itemId) {
 
 async function findInventoryItemByName(name) {
     const cleanName = normalizeName(name);
-    const foodItem = await findFoodItemByName(cleanName);
+    const foodItem = await foodItemService.findFoodItemByName(cleanName);
     if (foodItem) {
         const byFoodItem = await get(`SELECT * FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [foodItem.id]);
         if (byFoodItem) return byFoodItem;
@@ -1060,7 +1017,7 @@ async function findInventoryItemByName(name) {
 
 async function getOrCreateInventoryItem({ name, unit = "g", notes = "", calories_per_100g = null }) {
     const cleanName = normalizeName(name);
-    const foodItem = await getOrCreateFoodItem(cleanName, { calories_per_100g });
+    const foodItem = await foodItemService.getOrCreateFoodItem(cleanName, { calories_per_100g });
     let item = await findInventoryItemByName(cleanName);
     if (item) {
         if ((item.calories_per_100g === null || item.calories_per_100g === undefined) && calories_per_100g !== null && calories_per_100g !== undefined) {
@@ -1412,11 +1369,6 @@ function getInventoryStockTotal(item) {
     return batchTotal + legacyTotal;
 }
 
-function isInventoryItemProtected(item, recipeUsageByCanonical) {
-    const canonical = item?.canonical_name || buildFoodIdentity(item?.name).canonical_key || "";
-    return getInventoryStockTotal(item) > 0 || String(item?.source || "manual") !== "recipe" || Boolean(recipeUsageByCanonical.get(canonical));
-}
-
 function normalizeDuplicatePairIds(idA, idB) {
     const a = Number(idA);
     const b = Number(idB);
@@ -1432,7 +1384,7 @@ async function ensureFoodItemForInventoryRow(item) {
         if (existing) return existing;
     }
 
-    const foodItem = await getOrCreateFoodItem(item.name, { calories_per_100g: item.calories_per_100g });
+    const foodItem = await foodItemService.getOrCreateFoodItem(item.name, { calories_per_100g: item.calories_per_100g });
     await run(
         `UPDATE inventory_items SET food_item_id = ?, canonical_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [foodItem.id, foodItem.canonical_key, item.id]
@@ -1446,14 +1398,14 @@ async function moveFoodAliasesToMaster(sourceFoodItemId, masterFoodItemId, addit
     if (!Number.isFinite(masterId)) return;
 
     for (const alias of additionalAliases) {
-        if (alias) await addFoodAlias(masterId, alias);
+        if (alias) await foodItemService.addFoodAlias(masterId, alias);
     }
 
     if (!Number.isFinite(sourceId) || sourceId === masterId) return;
 
     const aliases = await all(`SELECT alias_name FROM food_aliases WHERE food_item_id = ?`, [sourceId]);
     for (const alias of aliases) {
-        await addFoodAlias(masterId, alias.alias_name);
+        await foodItemService.addFoodAlias(masterId, alias.alias_name);
     }
 }
 
@@ -1693,7 +1645,8 @@ async function buildRecipeIngredientRebuildPlan() {
 
     for (const recipe of recipes) {
         const parsed = parseIngredientsText(recipe.ingredients || "");
-        parsed.forEach((ingredient, index) => {
+        parsed.forEach(ingredient => {
+            const index = ingredient.line_index;
             const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
             if (!canonicalKey) return;
             if (!targetMap.has(canonicalKey)) {
@@ -1846,7 +1799,8 @@ async function applyRecipeIngredientRebuild(options = {}) {
 
             await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipe.id]);
 
-            for (const [index, ingredient] of parsed.entries()) {
+            for (const ingredient of parsed) {
+                const index = ingredient.line_index;
                 const canonicalKey = buildFoodIdentity(ingredient.food_name || ingredient.raw_text).canonical_key || "";
                 if (canonicalKey && overrideMaps.ignoreCreateByCanonical.has(canonicalKey)) continue;
 
@@ -1876,19 +1830,19 @@ async function applyRecipeIngredientRebuild(options = {}) {
 
                 // Sicherer automatischer Fallback: nur exakter Food-Item-/Alias-Treffer.
                 if (!foodItem) {
-                    foodItem = await findFoodItemByName(ingredient.food_name);
+                    foodItem = await foodItemService.findFoodItemByName(ingredient.food_name);
                     if (foodItem) linkSource = "auto_exact";
                 }
 
                 // Erst wenn wirklich kein bestehender Artikel/Alias/Preserve-Treffer existiert, neu anlegen.
                 if (!foodItem) {
-                    foodItem = await createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
+                    foodItem = await foodItemService.createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
                     linkSource = "new_from_resync";
                     createdItems += 1;
                 }
 
-                await addFoodAlias(foodItem.id, ingredient.raw_text);
-                await addFoodAlias(foodItem.id, ingredient.food_name);
+                await foodItemService.addFoodAlias(foodItem.id, ingredient.raw_text);
+                await foodItemService.addFoodAlias(foodItem.id, ingredient.food_name);
                 await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "admin_override" ? "manual" : "recipe" });
 
                 const inventoryItem = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [foodItem.id]);
@@ -1927,8 +1881,8 @@ async function applyRecipeIngredientRebuild(options = {}) {
                         await consolidateFoodItems(targetItem.food_item_id, [item.food_item_id]);
                     }
                     if (targetItem.food_item_id) {
-                        await addFoodAlias(targetItem.food_item_id, item.name);
-                        await addFoodAlias(targetItem.food_item_id, item.recipe_match_name || item.name);
+                        await foodItemService.addFoodAlias(targetItem.food_item_id, item.name);
+                        await foodItemService.addFoodAlias(targetItem.food_item_id, item.recipe_match_name || item.name);
                     }
                 }
             }
@@ -2117,7 +2071,7 @@ app.get("/recipes/by-ingredient/:name", async (req, res) => {
 
         for (const recipe of recipes) {
             const parsed = parseIngredientsText(recipe.ingredients || "");
-            const matchedIngredients = parsed.filter(ingredient => ingredientMatchesName(ingredient.food_name, ingredientName));
+            const matchedIngredients = parsed.filter(ingredient => ingredients.ingredientMatchesName(ingredient.food_name, ingredientName));
             if (matchedIngredients.length) {
                 matches.push({
                     ...normalizeRecipeRow(recipe),
@@ -2267,7 +2221,7 @@ app.get("/inventory/suggestions", async (req, res) => {
             const haystack = [row.name, row.inventory_name, row.canonical_name].join(" ").toLowerCase();
             if (haystack.includes(q.toLowerCase())) return true;
             if (qIdentity.canonical_key && row.canonical_name === qIdentity.canonical_key) return true;
-            return comparableNamesMatch(row.name, q);
+            return ingredients.comparableNamesMatch(row.name, q);
         }).slice(0, 10);
         res.json(filtered);
     } catch (error) {
@@ -2283,7 +2237,7 @@ app.get("/food-items/resolve", async (req, res) => {
         const lookupText = normalizeName(parsed?.food_name || originalQuery);
         if (!lookupText) return res.json({ query: originalQuery, lookup: lookupText, identity: null, exact: null, suggestions: [] });
         const identity = buildFoodIdentity(lookupText);
-        const exactFoodItem = await findFoodItemByName(lookupText);
+        const exactFoodItem = await foodItemService.findFoodItemByName(lookupText);
         const suggestions = await all(`
             SELECT fi.id, fi.display_name, fi.canonical_key, fi.calories_per_100g
             FROM food_items fi
@@ -2389,23 +2343,23 @@ app.put("/inventory/:id", async (req, res) => {
             // Sie darf niemals auf einen anderen food_item wechseln, sonst verlieren Rezepte/Aliase ihre Zuordnung.
             const currentFoodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [existing.food_item_id]);
             if (currentFoodItem) {
-                foodItem = await renameFoodItemStable(existing.food_item_id, validation.value.name, {
+                foodItem = await foodItemService.renameFoodItemStable(existing.food_item_id, validation.value.name, {
                     calories_per_100g: validation.value.calories_per_100g,
                     updateCanonical: true
                 });
             } else {
-                foodItem = await getOrCreateFoodItem(validation.value.name, {
+                foodItem = await foodItemService.getOrCreateFoodItem(validation.value.name, {
                     calories_per_100g: validation.value.calories_per_100g
                 });
             }
         } else {
-            foodItem = await getOrCreateFoodItem(validation.value.name, {
+            foodItem = await foodItemService.getOrCreateFoodItem(validation.value.name, {
                 calories_per_100g: validation.value.calories_per_100g
             });
         }
 
-        await addFoodAlias(foodItem.id, existing.name);
-        await addFoodAlias(foodItem.id, validation.value.name);
+        await foodItemService.addFoodAlias(foodItem.id, existing.name);
+        await foodItemService.addFoodAlias(foodItem.id, validation.value.name);
 
         await run(
             `UPDATE inventory_items
@@ -3188,7 +3142,7 @@ app.put("/admin/food-items/:id", async (req, res) => {
         if (calories !== null && (!Number.isFinite(calories) || calories < 0)) return res.status(400).json({ error: "kcal / 100 g ist ungültig." });
         const item = await get(`SELECT * FROM food_items WHERE id = ?`, [id]);
         if (!item) return res.status(404).json({ error: "Lebensmittel-Stammsatz wurde nicht gefunden." });
-        await renameFoodItemStable(id, displayName, { calories_per_100g: calories, updateCanonical: true });
+        await foodItemService.renameFoodItemStable(id, displayName, { calories_per_100g: calories, updateCanonical: true });
         await replaceFoodItemHealthFactors(id, req.body?.health_factor_ids || []);
         res.json({ success: true, detail: await getFoodItemAdminDetail(id), table: await getAdminTablePreview("food_items") });
     } catch (error) {
@@ -3253,7 +3207,7 @@ app.post("/admin/food-aliases", async (req, res) => {
         if (!aliasName) return res.status(400).json({ error: "Alias ist erforderlich." });
         const item = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
         if (!item) return res.status(404).json({ error: "Ziel-Lebensmittel wurde nicht gefunden." });
-        await addFoodAlias(foodItemId, aliasName);
+        await foodItemService.addFoodAlias(foodItemId, aliasName);
         res.json({ success: true, detail: await getFoodItemAdminDetail(foodItemId), table: await getAdminTablePreview("food_aliases") });
     } catch (error) {
         console.error("Fehler bei POST /admin/food-aliases:", error.message);
@@ -3326,11 +3280,11 @@ async function consolidateFoodItems(masterFoodItemId, duplicateFoodItemIds = [])
 
         const merged = [];
         for (const duplicate of duplicates) {
-            await addFoodAlias(masterId, duplicate.display_name);
-            await addFoodAlias(masterId, duplicate.canonical_key);
+            await foodItemService.addFoodAlias(masterId, duplicate.display_name);
+            await foodItemService.addFoodAlias(masterId, duplicate.canonical_key);
 
             const aliases = await all(`SELECT alias_name FROM food_aliases WHERE food_item_id = ?`, [duplicate.id]);
-            for (const alias of aliases) await addFoodAlias(masterId, alias.alias_name);
+            for (const alias of aliases) await foodItemService.addFoodAlias(masterId, alias.alias_name);
 
             await run(
                 `UPDATE recipe_ingredients
