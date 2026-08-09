@@ -9,11 +9,14 @@
     "migrate": "node scripts/migrate.js",
     "backup": "node scripts/backup.js",
     "restore:test": "node scripts/restore-test.js",
-    "test:ingredients": "node tests/ingredientModule.test.js"
+    "test:ingredients": "node tests/ingredientModule.test.js",
+    "identity:bootstrap": "node scripts/bootstrap-identity.js",
+    "test:identity": "node tests/identity-core.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "sqlite3": "^5.1.4",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "argon2": "^0.41.1"
   }
 }
