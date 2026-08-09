@@ -8,6 +8,8 @@ const inventoryService = require("./src/modules/inventory/service");
 const inventoryRoutes = require("./src/modules/inventory/routes");
 const mealPlanRoutes = require("./src/modules/mealPlans/routes");
 const recipeQueryRoutes = require("./src/modules/recipes/queryRoutes");
+const recipeWriteRoutes = require("./src/modules/recipes/writeRoutes");
+const recipeSyncService = require("./src/modules/recipes/syncService");
 
 
 const normalizeVisibleFoodName = ingredients.normalizeVisibleFoodName;
@@ -222,185 +224,8 @@ async function ensureSchema() {
     // Wichtig: Der Rezept-Zutaten-Sync darf beim Serverstart keine bestehenden
     // Verknüpfungen löschen und neu anlegen. Sonst entstehen bei jedem Neustart
     // neue Lebensmittel-/Inventarartikel aus denselben Rezeptzutaten.
-    await backfillMissingRecipeIngredientLinks();
+    await recipeSyncService.backfillMissingRecipeIngredientLinks();
 }
-
-function parseMealTypes(value) {
-    if (!value) return [];
-    if (Array.isArray(value)) return value;
-    try {
-        const parsed = JSON.parse(value);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-}
-
-async function getSelectedFoodItemForIngredient(explicitLinks, index, rawText) {
-    const links = Array.isArray(explicitLinks) ? explicitLinks : [];
-    const link = links.find(entry => {
-        if (Number(entry.line_index) !== Number(index)) return false;
-        if (entry.raw_text && rawText && entry.raw_text.trim() !== rawText.trim()) return false;
-        return true;
-    });
-    if (!link || !link.food_item_id) return null;
-    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [link.food_item_id]);
-    return foodItem || null;
-}
-
-async function getPreservedFoodItemForIngredient(previousLinks, index, ingredient) {
-    const links = Array.isArray(previousLinks) ? previousLinks : [];
-    const raw = ingredients.normalizeIngredientRawLineForMatch(ingredient?.raw_text);
-    const foodName = ingredient?.food_name || "";
-
-    // 1) stärkster Fall: gleiche Zeile und identischer Text, whitespace-tolerant
-    let link = links.find(entry =>
-        Number(entry.sort_order) === Number(index) &&
-        ingredients.normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
-        entry.food_item_id
-    );
-
-    // 2) Fallback: identischer Text an anderer Stelle, falls Zeilen verschoben wurden
-    if (!link && raw) {
-        link = links.find(entry =>
-            ingredients.normalizeIngredientRawLineForMatch(entry.raw_text) === raw &&
-            entry.food_item_id
-        );
-    }
-
-    // 3) Wichtiger Fall beim Bearbeiten: Menge geändert, Lebensmittel aber gleich.
-    // Beispiel: "100 g Reis" -> "150 g Reis" darf keinen neuen Artikel erzeugen.
-    if (!link && foodName) {
-        link = links.find(entry =>
-            Number(entry.sort_order) === Number(index) &&
-            ingredients.ingredientFoodNamesMatch(entry.food_name, foodName) &&
-            entry.food_item_id
-        );
-    }
-
-    // 4) Letzter sicherer Fallback: gleicher normalisierter Lebensmittelname in anderer Zeile.
-    if (!link && foodName) {
-        link = links.find(entry =>
-            ingredients.ingredientFoodNamesMatch(entry.food_name, foodName) &&
-            entry.food_item_id
-        );
-    }
-
-    if (!link) return null;
-    const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [link.food_item_id]);
-    if (!foodItem) return null;
-
-    return {
-        foodItem,
-        linkSource: link.link_source || "preserved"
-    };
-}
-
-async function ensureInventoryItemForFoodItem(foodItem, ingredient, { source = "recipe" } = {}) {
-    const existing = await get(`SELECT * FROM inventory_items WHERE food_item_id = ? LIMIT 1`, [foodItem.id]);
-    if (!existing) {
-        await run(
-            `INSERT INTO inventory_items (name, quantity, unit, weight, expiry_date, storage_location, notes, source, recipe_match_name, calories_per_100g, food_item_id, canonical_name)
-             VALUES (?, 0, ?, 0, '', '', '', ?, ?, ?, ?, ?)`,
-            [foodItem.display_name || ingredient.food_name, ingredient.unit || "g", source, foodItem.display_name || ingredient.food_name, foodItem.calories_per_100g ?? null, foodItem.id, foodItem.canonical_key]
-        );
-        return;
-    }
-
-    await run(
-        `UPDATE inventory_items
-         SET recipe_match_name = COALESCE(NULLIF(recipe_match_name, ''), ?),
-             canonical_name = COALESCE(NULLIF(canonical_name, ''), ?),
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [foodItem.display_name || ingredient.food_name, foodItem.canonical_key, existing.id]
-    );
-}
-
-async function syncRecipeIngredients(recipeId, ingredientsText, explicitLinks = [], options = {}) {
-    const { createMissing = true } = options;
-    const previousLinks = await all(
-        `SELECT sort_order, raw_text, food_name, canonical_key, food_item_id, link_source
-         FROM recipe_ingredients
-         WHERE recipe_id = ?`,
-        [recipeId]
-    );
-
-    await run(`DELETE FROM recipe_ingredients WHERE recipe_id = ?`, [recipeId]);
-    const parsedIngredients = parseIngredientsText(ingredientsText);
-
-   for (const ingredient of parsedIngredients) {
-        const index = ingredient.line_index;
-       
-        let linkSource = "new_from_recipe";
-        let foodItem = await getSelectedFoodItemForIngredient(
-            explicitLinks, 
-            index, 
-            ingredient.raw_text
-        );
-
-        if (foodItem) {
-            linkSource = "user_selected";
-            await foodItemService.addFoodAlias(foodItem.id, ingredient.raw_text);
-            await foodItemService.addFoodAlias(foodItem.id, ingredient.food_name);
-        } else {
-            const preserved = await getPreservedFoodItemForIngredient(previousLinks, index, ingredient);
-            if (preserved) {
-                foodItem = preserved.foodItem;
-                linkSource = preserved.linkSource === "new_from_recipe" ? "preserved_recipe" : preserved.linkSource;
-            }
-        }
-
-        if (!foodItem) {
-            // Strikte automatische Zuordnung: nur exakter Stammdaten-/Alias-Treffer.
-            // Keine Teiltreffer, keine Ähnlichkeitssuche, keine sichtbare Namenskorrektur.
-            foodItem = await foodItemService.findFoodItemByName(ingredient.food_name);
-            if (foodItem) {
-                linkSource = "auto_exact";
-            }
-        }
-
-        if (!foodItem) {
-            if (!createMissing) continue;
-            foodItem = await foodItemService.createDistinctFoodItemFromIngredient(ingredient.food_name, { aliasName: ingredient.raw_text });
-            linkSource = "new_from_recipe";
-        }
-
-        await run(
-            `INSERT INTO recipe_ingredients (recipe_id, raw_text, food_name, amount, unit, sort_order, updated_at, food_item_id, canonical_key, link_source)
-             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
-            [recipeId, ingredient.raw_text, ingredient.food_name, ingredient.amount, ingredient.unit, index, foodItem.id, foodItem.canonical_key, linkSource]
-        );
-
-        await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "user_selected" ? "manual" : "recipe" });
-    }
-}
-
-async function backfillMissingRecipeIngredientLinks() {
-    const recipes = await all(`SELECT id, ingredients FROM recipes`);
-    for (const recipe of recipes) {
-        const existing = await get(`SELECT COUNT(*) AS count FROM recipe_ingredients WHERE recipe_id = ?`, [recipe.id]);
-        if (Number(existing?.count || 0) > 0) continue;
-
-        // Nur wenn ein Rezept noch gar keine strukturierte Zutatenverknüpfung besitzt,
-        // wird einmalig aufgebaut. Bestehende Links werden beim Serverstart nie gelöscht.
-        await syncRecipeIngredients(recipe.id, recipe.ingredients || "", [], { createMissing: true });
-    }
-}
-
-function normalizeRecipeRow(recipe) {
-    return {
-        id: recipe.id,
-        name: recipe.name,
-        calories: Number(recipe.calories) || 0,
-        portions: recipe.portions ?? null,
-        mealTypes: parseMealTypes(recipe.mealTypes),
-        ingredients: recipe.ingredients || "",
-        instructions: recipe.instructions || "",
-        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
-    };
-}
-
 
 function normalizeFoodItemRow(row) {
     if (!row) return null;
@@ -429,49 +254,6 @@ async function migrateFoodItems() {
 }
 
 
-function toPositiveInteger(value) {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function normalizeIngredientLinks(value) {
-    if (!Array.isArray(value)) return [];
-    return value
-        .map(link => ({
-            line_index: Number.parseInt(link.line_index ?? link.index, 10),
-            food_item_id: Number.parseInt(link.food_item_id ?? link.foodItemId, 10),
-            raw_text: typeof link.raw_text === "string" ? link.raw_text : ""
-        }))
-        .filter(link => Number.isInteger(link.line_index) && link.line_index >= 0 && Number.isInteger(link.food_item_id) && link.food_item_id > 0);
-}
-
-function validateRecipePayload(payload, { allowEmptyPortions = false } = {}) {
-    const name = typeof payload.name === "string" ? payload.name.trim() : "";
-    const calories = toPositiveInteger(payload.calories);
-    const portions = payload.portions === "" || payload.portions === null || payload.portions === undefined
-        ? null
-        : toPositiveInteger(payload.portions);
-    const mealTypes = Array.isArray(payload.mealTypes) ? payload.mealTypes : [];
-
-    if (!name) return { error: "Name ist erforderlich." };
-    if (!calories) return { error: "Kalorien müssen als ganze Zahl größer 0 angegeben werden." };
-    if (!allowEmptyPortions && !portions) return { error: "Portionen müssen als ganze Zahl größer 0 angegeben werden." };
-    if (mealTypes.length === 0 && payload.mealTypes !== undefined) return { error: "Mindestens eine Mahlzeit muss ausgewählt werden." };
-
-    return {
-        value: {
-            name,
-            calories,
-            portions,
-            mealTypes,
-            ingredients: typeof payload.ingredients === "string" ? payload.ingredients : "",
-            instructions: typeof payload.instructions === "string" ? payload.instructions : "",
-            is_favorite: Number(payload.is_favorite) === 1 ? 1 : 0,
-            ingredientLinks: normalizeIngredientLinks(payload.ingredientLinks)
-        }
-    };
-}
-
 app.get("/", (req, res) => res.json({ status: "ok", service: "Food Calculator API" }));
 
 app.get("/check-db", async (req, res) => {
@@ -490,134 +272,7 @@ app.get("/check-db", async (req, res) => {
 app.use(inventoryRoutes);
 app.use(mealPlanRoutes);
 app.use(recipeQueryRoutes);
-
-async function getRecipeIngredientLinks(recipeId) {
-    const rows = await all(
-        `SELECT
-            ri.sort_order AS line_index,
-            ri.raw_text,
-            ri.food_name,
-            ri.amount,
-            ri.unit,
-            ri.food_item_id,
-            ri.link_source,
-            fi.display_name AS food_display_name
-         FROM recipe_ingredients ri
-         LEFT JOIN food_items fi ON fi.id = ri.food_item_id
-         WHERE ri.recipe_id = ?
-         ORDER BY ri.sort_order ASC`,
-        [recipeId]
-    );
-    return rows.map(row => ({
-        line_index: Number(row.line_index) || 0,
-        raw_text: row.raw_text || "",
-        food_name: row.food_display_name || row.food_name || "",
-        stored_food_name: row.food_name || "",
-        amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
-        unit: row.unit || "",
-        food_item_id: row.food_item_id || null,
-        link_source: row.link_source || ""
-    }));
-}
-
-async function normalizeRecipeRowWithIngredientLinks(recipe) {
-    return {
-        ...normalizeRecipeRow(recipe),
-        ingredientLinks: await getRecipeIngredientLinks(recipe.id)
-    };
-}
-
-function normalizeIngredientsTextForChangeCheck(value) {
-    return String(value || "")
-        .replace(/\r/g, "")
-        .split("\n")
-        .map(line => line.replace(/\s+/g, " ").trim())
-        .join("\n")
-        .trim();
-}
-
-function hasExplicitIngredientLinksPayload(payload) {
-    return Object.prototype.hasOwnProperty.call(payload || {}, "ingredientLinks") && Array.isArray(payload.ingredientLinks);
-}
-
-app.post("/recipes", async (req, res) => {
-    try {
-        const validation = validateRecipePayload(req.body);
-        if (validation.error) return res.status(400).json({ error: validation.error });
-        const recipe = validation.value;
-
-        const result = await run(
-            `INSERT INTO recipes (name, calories, portions, mealTypes, ingredients, instructions, is_favorite)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-                recipe.name,
-                recipe.calories,
-                recipe.portions,
-                JSON.stringify(recipe.mealTypes),
-                recipe.ingredients,
-                recipe.instructions,
-                recipe.is_favorite
-            ]
-        );
-
-        const created = await get(`SELECT * FROM recipes WHERE id = ?`, [result.lastID]);
-        await syncRecipeIngredients(created.id, created.ingredients || "", recipe.ingredientLinks);
-        res.status(201).json(await normalizeRecipeRowWithIngredientLinks(created));
-    } catch (error) {
-        console.error("Fehler bei POST /recipes:", error.message);
-        res.status(500).json({ error: "Fehler beim Speichern des Rezepts" });
-    }
-});
-
-app.put("/recipes/:id", async (req, res) => {
-    try {
-        const current = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        if (!current) return res.status(404).json({ error: "Rezept nicht gefunden" });
-
-        const validation = validateRecipePayload({
-            ...req.body,
-            mealTypes: req.body.mealTypes ?? parseMealTypes(current.mealTypes)
-        }, { allowEmptyPortions: true });
-        if (validation.error) return res.status(400).json({ error: validation.error });
-        const recipe = validation.value;
-
-        const favoriteValue = req.body.is_favorite === undefined
-            ? Number(current.is_favorite) || 0
-            : recipe.is_favorite;
-
-        await run(
-            `UPDATE recipes
-             SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?
-             WHERE id = ?`,
-            [
-                recipe.name,
-                recipe.calories,
-                recipe.portions,
-                JSON.stringify(recipe.mealTypes),
-                recipe.ingredients,
-                recipe.instructions,
-                favoriteValue,
-                req.params.id
-            ]
-        );
-
-        const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        const ingredientsChanged = normalizeIngredientsTextForChangeCheck(current.ingredients) !== normalizeIngredientsTextForChangeCheck(updated.ingredients);
-        const explicitLinksProvided = hasExplicitIngredientLinksPayload(req.body);
-
-        // Wichtig: Wenn nur Name, Kalorien, Portionen, Mahlzeiten oder Anleitung geändert werden,
-        // dürfen die bestehenden Zutaten-Verknüpfungen nicht neu synchronisiert werden.
-        // Genau das hat vorher beim erneuten Speichern bestehender Rezepte neue Inventarartikel erzeugen können.
-        if (ingredientsChanged || explicitLinksProvided) {
-            await syncRecipeIngredients(updated.id, updated.ingredients || "", recipe.ingredientLinks);
-        }
-
-        res.json(await normalizeRecipeRowWithIngredientLinks(updated));
-    } catch (error) {
-        console.error("Fehler bei PUT /recipes/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
-    }
-});
+app.use(recipeWriteRoutes);
 
 function getInventoryStockTotal(item) {
     const batches = Array.isArray(item?.batches) ? item.batches : [];
@@ -1070,7 +725,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
 
                 // Wichtigster Schutz: bestehende, einmal gesetzte Verknüpfungen bleiben erhalten.
                 // Die Admin-Synchronisierung darf sie nicht durch neue Parse-Entscheidungen überschreiben.
-                const preserved = await getPreservedFoodItemForIngredient(previousRecipeLinks, index, ingredient);
+                const preserved = await recipeSyncService.getPreservedFoodItemForIngredient(previousRecipeLinks, index, ingredient);
                 if (preserved?.foodItem) {
                     foodItem = preserved.foodItem;
                     linkSource = preserved.linkSource || "preserved_resync";
@@ -1104,7 +759,7 @@ async function applyRecipeIngredientRebuild(options = {}) {
 
                 await foodItemService.addFoodAlias(foodItem.id, ingredient.raw_text);
                 await foodItemService.addFoodAlias(foodItem.id, ingredient.food_name);
-                await ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "admin_override" ? "manual" : "recipe" });
+                await recipeSyncService.ensureInventoryItemForFoodItem(foodItem, ingredient, { source: linkSource === "admin_override" ? "manual" : "recipe" });
 
                 const inventoryItem = await get(`SELECT id FROM inventory_items WHERE food_item_id = ? ORDER BY id ASC LIMIT 1`, [foodItem.id]);
                 if (inventoryItem?.id) usedInventoryIds.add(Number(inventoryItem.id));
