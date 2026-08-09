@@ -1,5 +1,7 @@
 const app = require("./src/app");
-const { run, get, all } = require("./src/database/database");
+const database = require("./src/database/database");
+const { run, get, all } = database;
+const { runMigrations } = require("./lib/migrationRunner");
 const { addColumnIfMissing } = require("./src/database/schema");
 const { backfillInventoryBatchDefaults } = require("./src/database/inventoryMigrations");
 const ingredients = require("./src/shared/ingredients");
@@ -317,11 +319,21 @@ app.get("/food-items/resolve", async (req, res) => {
 
 
 
-ensureSchema()
-    .then(() => {
-        app.listen(PORT, () => console.log(`Food Calculator API läuft auf Port ${PORT}`));
-    })
-    .catch((error) => {
-        console.error("Datenbankinitialisierung fehlgeschlagen:", error.message);
-        process.exit(1);
+async function startServer() {
+    const connection = database.getDefaultConnection();
+    await database.configureDatabase(connection);
+    const migrationResult = await runMigrations(connection);
+    if (migrationResult.appliedNow.length) {
+        console.log(`Migrationen angewendet: ${migrationResult.appliedNow.join(", ")}`);
+    }
+    await ensureSchema();
+    app.listen(PORT, () => {
+        console.log(`Food Calculator API läuft auf Port ${PORT}`);
+        console.log(`SQLite verbunden: ${connection.databasePath}`);
     });
+}
+
+startServer().catch((error) => {
+    console.error("Datenbankinitialisierung fehlgeschlagen:", error.message);
+    process.exit(1);
+});
