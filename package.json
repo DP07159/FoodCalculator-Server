@@ -12,7 +12,9 @@
     "test:ingredients": "node tests/ingredientModule.test.js",
     "identity:bootstrap": "node scripts/bootstrap-identity.js",
     "test:identity": "node tests/identity-core.test.js",
-    "identity:reset-password": "node scripts/reset-identity-password.js"
+    "identity:reset-password": "node scripts/reset-identity-password.js",
+    "workspace:bootstrap": "node scripts/bootstrap-workspaces.js",
+    "test:workspace": "node tests/workspace-core.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",
