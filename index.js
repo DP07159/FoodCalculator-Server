@@ -15,6 +15,7 @@ const recipeSyncService = require("./src/modules/recipes/syncService");
 const adminRoutes = require("./src/modules/admin/routes");
 const identity = require("./src/core/identity");
 const workspaces = require("./src/core/workspaces");
+const authorization = require("./src/core/authorization");
 
 
 const normalizeGermanText = ingredients.normalizeGermanText;
@@ -278,6 +279,7 @@ app.use(recipeWriteRoutes);
 app.use(adminRoutes);
 app.use("/auth", identity.routes);
 app.use("/workspaces", workspaces.routes);
+app.use("/authorization", authorization.routes);
 
 
 app.get("/food-items/resolve", async (req, res) => {
