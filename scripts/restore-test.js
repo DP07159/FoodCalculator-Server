@@ -16,7 +16,7 @@ function resolveBackupPath() {
         return resolved;
     }
 
-    const backupDir = path.resolve(__dirname, "..", "backups");
+    const backupDir = path.resolve(process.env.BACKUP_DIR || "/var/data/backups");
 
     if (!fs.existsSync(backupDir)) {
         throw new Error(
