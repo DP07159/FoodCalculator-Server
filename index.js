@@ -6,18 +6,14 @@ const ingredients = require("./src/shared/ingredients");
 const foodItemService = require("./src/modules/foodItems/service");
 const inventoryService = require("./src/modules/inventory/service");
 const inventoryRoutes = require("./src/modules/inventory/routes");
+const mealPlanRoutes = require("./src/modules/mealPlans/routes");
+const recipeQueryRoutes = require("./src/modules/recipes/queryRoutes");
 
-const parseFraction = ingredients.parseFraction;
-const normalizeIngredientUnit = ingredients.normalizeIngredientUnit;
-const unitForInventory = ingredients.unitForInventory;
-const convertIngredientAmount = ingredients.convertIngredientAmount;
 
-const normalizeIngredientText = ingredients.normalizeIngredientText;
 const normalizeVisibleFoodName = ingredients.normalizeVisibleFoodName;
 const normalizeGermanText = ingredients.normalizeGermanText;
 const buildFoodIdentity = ingredients.buildFoodIdentity;
 const canonicalizeIngredientName = ingredients.canonicalizeIngredientName;
-const findAmountUnitInIngredient = ingredients.findAmountUnitInIngredient;
 const parseIngredientLine = ingredients.parseIngredientLine;
 const parseIngredientsText = ingredients.parseIngredientsText;
 
@@ -392,165 +388,6 @@ async function backfillMissingRecipeIngredientLinks() {
     }
 }
 
-function improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems) {
-    // Keine automatische Umbenennung/Zuordnung anhand ähnlicher Namen.
-    // Der sichere Weg ist: expliziter Link aus recipe_ingredients oder exakter Treffer.
-    return parsedIngredient;
-}
-
-function scaleIngredientLineForPortions(rawLine, factor) {
-    if (factor === 1) return rawLine;
-    const text = String(rawLine || "");
-    const amountUnit = findAmountUnitInIngredient(text);
-    if (!amountUnit) return text;
-
-    const amount = parseFraction(amountUnit.amountText);
-    if (amount === null || amount === undefined) return text;
-
-    const scaled = Math.round(amount * factor * 100) / 100;
-    const scaledText = String(scaled).replace(".", ",");
-    return `${text.slice(0, amountUnit.start)}${scaledText}${text.slice(amountUnit.start + amountUnit.amountText.length)}`;
-}
-
-function getInventoryStockBreakdown(item) {
-    const batches = Array.isArray(item?.batches) ? item.batches : [];
-
-    return batches.reduce((result, batch) => {
-        const batchUnit = unitForInventory(batch.measure_unit || item.unit || "g");
-        const remainingQuantity = Math.max(0, Number(batch.remaining_quantity || 0));
-        const remainingWeight = Math.max(0, Number(batch.remaining_weight || 0));
-
-        if (batch.batch_type === "package") {
-            result.packageCount += remainingQuantity;
-        }
-
-        if (batchUnit === "g") {
-            result.g += remainingWeight;
-        } else if (batchUnit === "ml") {
-            result.ml += remainingWeight;
-        } else if (batchUnit === "Stk.") {
-            if (batch.batch_type === "package") {
-                result.stk += remainingQuantity;
-            } else {
-                result.stk += remainingWeight;
-            }
-        }
-
-        return result;
-    }, { g: 0, ml: 0, stk: 0, packageCount: 0 });
-}
-
-function isContainerUnit(unit) {
-    const normalized = normalizeIngredientUnit(unit);
-    return ["Dose", "Glas", "Packung", "Stk."].includes(normalized);
-}
-
-function getInventoryAvailableAmountForUnit(item, requestedUnit) {
-    if (!item) return 0;
-    const inventoryUnit = unitForInventory(requestedUnit || item.unit || "g");
-    const stock = getInventoryStockBreakdown(item);
-
-    if (inventoryUnit === "g") return stock.g;
-    if (inventoryUnit === "ml") return stock.ml;
-    if (inventoryUnit === "Stk.") return stock.stk || stock.packageCount;
-    return 0;
-}
-
-function compareRecipeIngredientWithStock(item, ingredient, required) {
-    if (!item) {
-        return { available: 0, status: "missing", note: "Kein passendes Lebensmittel im Inventar" };
-    }
-
-    const requestedUnit = ingredient?.unit || item.unit || "g";
-    const inventoryUnit = unitForInventory(requestedUnit);
-    const originalUnit = normalizeIngredientUnit(ingredient?.original_unit || requestedUnit);
-    const stock = getInventoryStockBreakdown(item);
-    const available = getInventoryAvailableAmountForUnit(item, requestedUnit);
-    const hasAnyStock = stock.g > 0 || stock.ml > 0 || stock.stk > 0 || stock.packageCount > 0;
-
-    if (!hasAnyStock) {
-        return { available: 0, status: "missing", note: "Bestand ist 0" };
-    }
-
-    if (required === null || required === undefined || !Number.isFinite(Number(required)) || Number(required) <= 0) {
-        return { available, status: "available", note: "Lebensmittel ist im Bestand" };
-    }
-
-    if (inventoryUnit === "Stk." && isContainerUnit(originalUnit)) {
-        const countAvailable = stock.stk || stock.packageCount;
-        if (countAvailable >= Number(required)) {
-            return { available: countAvailable, status: "available", note: "Benötigte Einheit ist vorhanden" };
-        }
-        if (countAvailable > 0) {
-            return { available: countAvailable, status: "partial", note: "Nur ein Teil der benötigten Einheiten ist vorhanden" };
-        }
-
-        // Beispiel: Rezept verlangt „1 Dose Thunfisch“, Inventar enthält aber nur eine freie/gewichtete Menge
-        // desselben Lebensmittels. Das ist nicht exakt vergleichbar, aber definitiv nicht „Bestand 0“.
-        return { available: 0, status: "partial", note: "Lebensmittel vorhanden, Einheit/Menge aber nicht exakt vergleichbar" };
-    }
-
-    if (available >= Number(required)) {
-        return { available, status: "available", note: "Benötigte Menge ist vorhanden" };
-    }
-
-    if (available > 0) {
-        return { available, status: "partial", note: "Nur ein Teil der benötigten Menge ist vorhanden" };
-    }
-
-    // Auch hier gilt: Wenn das Lebensmittel vorhanden ist, aber nur in einer anderen Mengeneinheit,
-    // zeigen wir gelb statt rot. Rot ist strikt für echten Leerbestand reserviert.
-    return { available, status: "partial", note: "Lebensmittel vorhanden, aber nicht in der benötigten Einheit" };
-}
-
-function findInventoryItemForIngredient(parsedIngredient, inventoryItems) {
-    if (!parsedIngredient) return null;
-
-    if (parsedIngredient.food_item_id) {
-        const byFoodItemId = inventoryItems.find(item => Number(item.food_item_id) === Number(parsedIngredient.food_item_id));
-        if (byFoodItemId) return byFoodItemId;
-    }
-
-    if (parsedIngredient.matched_item_id) {
-        const byId = inventoryItems.find(item => Number(item.id) === Number(parsedIngredient.matched_item_id));
-        if (byId) return byId;
-    }
-
-    const ingredientKey = buildFoodIdentity(parsedIngredient.food_name).canonical_key;
-    if (!ingredientKey) return null;
-
-    return inventoryItems.find(item => {
-        const itemKey = item.canonical_name || buildFoodIdentity(item.name).canonical_key;
-        return itemKey && itemKey === ingredientKey;
-    }) || null;
-}
-
-function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
-    const improved = improveIngredientNameWithKnownItems(parsedIngredient, inventoryItems);
-    const item = findInventoryItemForIngredient(improved, inventoryItems);
-    const requiredBase = improved?.amount;
-    const required = requiredBase !== null && requiredBase !== undefined && Number.isFinite(Number(requiredBase))
-        ? Number(requiredBase) * factor
-        : null;
-    const requestedUnit = improved?.unit || item?.unit || "g";
-    const comparison = compareRecipeIngredientWithStock(item, improved, required);
-
-    return {
-        line_index: parsedIngredient?.line_index ?? null,
-        raw_text: improved?.raw_text || "",
-        display_text: scaleIngredientLineForPortions(improved?.raw_text || "", factor),
-        food_name: improved?.food_name || "",
-        item_id: item?.id || null,
-        required_amount: required,
-        required_unit: requestedUnit,
-        available_amount: comparison.available,
-        status: comparison.status,
-        label: comparison.status === "available" ? "Vorhanden" : comparison.status === "partial" ? "Teilweise vorhanden" : "Nicht vorhanden",
-        note: comparison.note
-    };
-}
-
-
 function normalizeRecipeRow(recipe) {
     return {
         id: recipe.id,
@@ -562,12 +399,6 @@ function normalizeRecipeRow(recipe) {
         instructions: recipe.instructions || "",
         is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
     };
-}
-
-function normalizePlanRow(plan) {
-    let data = [];
-    try { data = JSON.parse(plan.data || "[]"); } catch { data = []; }
-    return { id: plan.id, name: plan.name, data };
 }
 
 
@@ -657,6 +488,8 @@ app.get("/check-db", async (req, res) => {
 });
 
 app.use(inventoryRoutes);
+app.use(mealPlanRoutes);
+app.use(recipeQueryRoutes);
 
 async function getRecipeIngredientLinks(recipeId) {
     const rows = await all(
@@ -785,71 +618,6 @@ app.put("/recipes/:id", async (req, res) => {
         res.status(500).json({ error: "Fehler beim Aktualisieren des Rezepts" });
     }
 });
-
-app.get("/meal_plans", async (req, res) => {
-    try {
-        const rows = await all(`SELECT * FROM meal_plans ORDER BY id DESC`);
-        res.json(rows.map(normalizePlanRow));
-    } catch (error) {
-        console.error("Fehler bei GET /meal_plans:", error.message);
-        res.status(500).json({ error: "Fehler beim Laden der Wochenpläne" });
-    }
-});
-
-app.get("/meal_plans/:id", async (req, res) => {
-    try {
-        const row = await get(`SELECT * FROM meal_plans WHERE id = ?`, [req.params.id]);
-        if (!row) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-        res.json(normalizePlanRow(row));
-    } catch (error) {
-        console.error("Fehler bei GET /meal_plans/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Laden des Wochenplans" });
-    }
-});
-
-app.post("/meal_plans", async (req, res) => {
-    try {
-        const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-        const data = Array.isArray(req.body.data) ? req.body.data : null;
-        if (!name || !data) return res.status(400).json({ error: "Name und Daten sind erforderlich." });
-
-        const result = await run(`INSERT INTO meal_plans (name, data) VALUES (?, ?)`, [name, JSON.stringify(data)]);
-        const created = await get(`SELECT * FROM meal_plans WHERE id = ?`, [result.lastID]);
-        res.status(201).json(normalizePlanRow(created));
-    } catch (error) {
-        console.error("Fehler bei POST /meal_plans:", error.message);
-        res.status(500).json({ error: "Fehler beim Speichern des Wochenplans" });
-    }
-});
-
-app.put("/meal_plans/:id", async (req, res) => {
-    try {
-        const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-        const data = Array.isArray(req.body.data) ? req.body.data : null;
-        if (!name || !data) return res.status(400).json({ error: "Name und Daten sind erforderlich." });
-
-        const result = await run(`UPDATE meal_plans SET name = ?, data = ? WHERE id = ?`, [name, JSON.stringify(data), req.params.id]);
-        if (result.changes === 0) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-        const updated = await get(`SELECT * FROM meal_plans WHERE id = ?`, [req.params.id]);
-        res.json(normalizePlanRow(updated));
-    } catch (error) {
-        console.error("Fehler bei PUT /meal_plans/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Aktualisieren des Wochenplans" });
-    }
-});
-
-app.delete("/meal_plans/:id", async (req, res) => {
-    try {
-        const result = await run(`DELETE FROM meal_plans WHERE id = ?`, [req.params.id]);
-        if (result.changes === 0) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
-        res.json({ success: true });
-    } catch (error) {
-        console.error("Fehler bei DELETE /meal_plans/:id:", error.message);
-        res.status(500).json({ error: "Fehler beim Löschen des Wochenplans" });
-    }
-});
-
-
 
 function getInventoryStockTotal(item) {
     const batches = Array.isArray(item?.batches) ? item.batches : [];
@@ -1499,155 +1267,6 @@ async function buildInventoryCleanupPreview() {
     };
 }
 
-
-
-app.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
-    try {
-        const foodItemId = Number.parseInt(req.params.foodItemId, 10);
-        if (!Number.isInteger(foodItemId) || foodItemId <= 0) {
-            return res.status(400).json({ error: "Gültige food_item_id ist erforderlich." });
-        }
-
-        const foodItem = await get(`SELECT * FROM food_items WHERE id = ?`, [foodItemId]);
-        if (!foodItem) return res.status(404).json({ error: "Lebensmittel-Stammsatz nicht gefunden." });
-
-        const rows = await all(`
-            SELECT
-                r.*,
-                ri.id AS ingredient_link_id,
-                ri.raw_text AS ingredient_raw_text,
-                ri.food_name AS ingredient_food_name,
-                ri.amount AS ingredient_amount,
-                ri.unit AS ingredient_unit,
-                ri.sort_order AS ingredient_sort_order
-            FROM recipe_ingredients ri
-            INNER JOIN recipes r ON r.id = ri.recipe_id
-            WHERE ri.food_item_id = ?
-            ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
-        `, [foodItemId]);
-
-        const recipeMap = new Map();
-        for (const row of rows) {
-            if (!recipeMap.has(row.id)) {
-                recipeMap.set(row.id, {
-                    ...normalizeRecipeRow(row),
-                    matched_ingredients: []
-                });
-            }
-            recipeMap.get(row.id).matched_ingredients.push({
-                id: row.ingredient_link_id,
-                raw_text: row.ingredient_raw_text || row.ingredient_food_name || "",
-                food_name: row.ingredient_food_name || foodItem.display_name || "",
-                amount: row.ingredient_amount,
-                unit: row.ingredient_unit || ""
-            });
-        }
-
-        res.json({
-            food_item_id: foodItemId,
-            food_item: normalizeFoodItemRow(foodItem),
-            recipes: Array.from(recipeMap.values())
-        });
-    } catch (error) {
-        console.error("Fehler bei GET /recipes/by-food-item/:foodItemId:", error.message);
-        res.status(500).json({ error: "Rezepte zum Lebensmittel konnten nicht geladen werden" });
-    }
-});
-
-app.get("/recipes/by-ingredient/:name", async (req, res) => {
-    try {
-        const ingredientName = normalizeIngredientText(req.params.name || "");
-        if (!ingredientName) return res.status(400).json({ error: "Lebensmittelname ist erforderlich." });
-
-        const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
-        const matches = [];
-
-        for (const recipe of recipes) {
-            const parsed = parseIngredientsText(recipe.ingredients || "");
-            const matchedIngredients = parsed.filter(ingredient => ingredients.ingredientMatchesName(ingredient.food_name, ingredientName));
-            if (matchedIngredients.length) {
-                matches.push({
-                    ...normalizeRecipeRow(recipe),
-                    matched_ingredients: matchedIngredients.map(ingredient => ({
-                        raw_text: ingredient.raw_text,
-                        food_name: ingredient.food_name,
-                        amount: ingredient.amount,
-                        unit: ingredient.unit
-                    }))
-                });
-            }
-        }
-
-        res.json({ ingredient: ingredientName, recipes: matches });
-    } catch (error) {
-        console.error("Fehler bei GET /recipes/by-ingredient/:name:", error.message);
-        res.status(500).json({ error: "Rezepte zur Zutat konnten nicht geladen werden" });
-    }
-});
-
-
-
-app.get("/recipes/:id/stock-check", async (req, res) => {
-    try {
-        const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [req.params.id]);
-        if (!recipe) return res.status(404).json({ error: "Rezept nicht gefunden" });
-
-        const requestedPortions = Number.parseInt(req.query.portions, 10);
-        const basePortions = Number.parseInt(recipe.portions, 10) > 0 ? Number.parseInt(recipe.portions, 10) : 1;
-        const displayedPortions = Number.isInteger(requestedPortions) && requestedPortions > 0 ? requestedPortions : basePortions;
-        const factor = displayedPortions / basePortions;
-
-        const inventoryItems = await inventoryService.getAllInventoryItemsWithBatches();
-
-        const linkedIngredients = await all(
-            `SELECT
-                ri.raw_text,
-                ri.food_name,
-                ri.amount,
-                ri.unit,
-                ri.sort_order,
-                ri.food_item_id,
-                fi.display_name AS food_display_name
-             FROM recipe_ingredients ri
-             LEFT JOIN food_items fi ON fi.id = ri.food_item_id
-             WHERE ri.recipe_id = ?
-             ORDER BY ri.sort_order ASC`,
-            [req.params.id]
-        );
-
-        const parsedIngredients = linkedIngredients.length
-            ? linkedIngredients.map(row => ({
-                line_index: Number(row.sort_order),
-                raw_text: row.raw_text || "",
-                food_name: row.food_display_name || row.food_name || "",
-                amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
-                unit: row.unit || "",
-                original_unit: row.unit || "",
-                food_item_id: row.food_item_id || null
-            }))
-            : parseIngredientsText(recipe.ingredients || "");
-
-        const entries = parsedIngredients.map(ingredient => buildRecipeStockEntry(ingredient, inventoryItems, factor));
-
-        const summary = entries.reduce((result, entry) => {
-            if (entry.status === "available") result.available += 1;
-            if (entry.status === "partial") result.partial += 1;
-            if (entry.status === "missing") result.missing += 1;
-            return result;
-        }, { available: 0, partial: 0, missing: 0 });
-
-        res.json({
-            recipe_id: Number(recipe.id),
-            base_portions: basePortions,
-            displayed_portions: displayedPortions,
-            ingredients: entries,
-            summary
-        });
-    } catch (error) {
-        console.error("Fehler bei GET /recipes/:id/stock-check:", error.message);
-        res.status(500).json({ error: "Bestandsprüfung konnte nicht geladen werden" });
-    }
-});
 
 
 app.get("/food-items/resolve", async (req, res) => {
