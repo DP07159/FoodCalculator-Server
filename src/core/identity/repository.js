@@ -57,6 +57,17 @@ function updatePasswordCredential(credentialId, passwordHash) {
     );
 }
 
+
+function revokeAllSessions(userId) {
+    return run(
+        `UPDATE user_sessions
+         SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+         WHERE user_id = ?
+           AND revoked_at IS NULL`,
+        [userId]
+    );
+}
+
 function revokeOtherSessions(userId, currentSessionId) {
     return run(
         `UPDATE user_sessions
@@ -171,6 +182,7 @@ module.exports = {
     findCredential,
     createPasswordCredential,
     updatePasswordCredential,
+    revokeAllSessions,
     revokeOtherSessions,
     resetCredentialFailures,
     registerCredentialFailure,

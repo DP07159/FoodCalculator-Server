@@ -11,7 +11,8 @@
     "restore:test": "node scripts/restore-test.js",
     "test:ingredients": "node tests/ingredientModule.test.js",
     "identity:bootstrap": "node scripts/bootstrap-identity.js",
-    "test:identity": "node tests/identity-core.test.js"
+    "test:identity": "node tests/identity-core.test.js",
+    "identity:reset-password": "node scripts/reset-identity-password.js"
   },
   "dependencies": {
     "express": "^4.18.2",
