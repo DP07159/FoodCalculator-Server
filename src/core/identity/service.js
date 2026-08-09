@@ -2,7 +2,11 @@ const crypto = require("crypto");
 const argon2 = require("argon2");
 const repository = require("./repository");
 const { mapUser, mapSession } = require("./mapper");
-const { validateBootstrapPayload, validateLoginPayload } = require("./validator");
+const {
+    validateBootstrapPayload,
+    validateLoginPayload,
+    validateChangePasswordPayload
+} = require("./validator");
 
 const SESSION_TTL_DAYS = Math.max(1, Number(process.env.SESSION_TTL_DAYS || 30));
 const MAX_FAILED_ATTEMPTS = 5;
@@ -139,6 +143,37 @@ async function authenticateToken(token) {
     };
 }
 
+async function changePassword(userId, currentSessionId, payload) {
+    const validation = validateChangePasswordPayload(payload);
+    if (validation.error) return { error: validation.error, status: 400 };
+
+    const credential = await repository.findCredential(userId, "password");
+    if (!credential?.password_hash) {
+        return { error: "Für dieses Benutzerkonto ist kein Passwort-Login eingerichtet.", status: 409 };
+    }
+
+    const currentPasswordValid = await argon2.verify(
+        credential.password_hash,
+        validation.value.currentPassword
+    );
+
+    if (!currentPasswordValid) {
+        return { error: "Aktuelles Passwort ist falsch.", status: 401 };
+    }
+
+    const newHash = await hashPassword(validation.value.newPassword);
+    await repository.updatePasswordCredential(credential.id, newHash);
+
+    if (validation.value.revokeOtherSessions) {
+        await repository.revokeOtherSessions(userId, currentSessionId);
+    }
+
+    return {
+        success: true,
+        other_sessions_revoked: validation.value.revokeOtherSessions
+    };
+}
+
 async function logout(token) {
     const rawToken = String(token || "").trim();
     if (!rawToken) return false;
@@ -162,6 +197,7 @@ module.exports = {
     bootstrapInitialUser,
     login,
     authenticateToken,
+    changePassword,
     logout,
     listSessions,
     revokeOwnSession,

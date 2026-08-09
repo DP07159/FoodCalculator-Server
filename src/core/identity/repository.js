@@ -44,6 +44,30 @@ async function createPasswordCredential(userId, passwordHash) {
     return get(`SELECT * FROM user_credentials WHERE id = ?`, [result.lastID]);
 }
 
+function updatePasswordCredential(credentialId, passwordHash) {
+    return run(
+        `UPDATE user_credentials
+         SET password_hash = ?,
+             password_changed_at = CURRENT_TIMESTAMP,
+             failed_attempts = 0,
+             locked_until = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND credential_type = 'password'`,
+        [passwordHash, credentialId]
+    );
+}
+
+function revokeOtherSessions(userId, currentSessionId) {
+    return run(
+        `UPDATE user_sessions
+         SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+         WHERE user_id = ?
+           AND id <> ?
+           AND revoked_at IS NULL`,
+        [userId, currentSessionId]
+    );
+}
+
 function resetCredentialFailures(credentialId) {
     return run(
         `UPDATE user_credentials
@@ -146,6 +170,8 @@ module.exports = {
     createUser,
     findCredential,
     createPasswordCredential,
+    updatePasswordCredential,
+    revokeOtherSessions,
     resetCredentialFailures,
     registerCredentialFailure,
     createSession,

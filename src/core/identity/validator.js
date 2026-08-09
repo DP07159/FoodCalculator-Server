@@ -25,6 +25,25 @@ function validateLoginPayload(payload = {}) {
     return { value: { email, password } };
 }
 
+function validateChangePasswordPayload(payload = {}) {
+    const currentPassword = typeof payload.current_password === "string" ? payload.current_password : "";
+    const newPassword = typeof payload.new_password === "string" ? payload.new_password : "";
+    const revokeOtherSessions = payload.revoke_other_sessions !== false;
+
+    if (!currentPassword) return { error: "Aktuelles Passwort ist erforderlich." };
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) return { error: passwordError };
+    if (currentPassword === newPassword) return { error: "Das neue Passwort muss sich vom aktuellen Passwort unterscheiden." };
+
+    return {
+        value: {
+            currentPassword,
+            newPassword,
+            revokeOtherSessions
+        }
+    };
+}
+
 function validateBootstrapPayload(payload = {}) {
     const email = normalizeEmail(payload.email);
     const displayName = String(payload.display_name || payload.displayName || "").trim();
@@ -46,5 +65,6 @@ module.exports = {
     validateEmail,
     validatePassword,
     validateLoginPayload,
+    validateChangePasswordPayload,
     validateBootstrapPayload
 };

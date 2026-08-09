@@ -1,5 +1,9 @@
 const argon2 = require("argon2");
-const { validateBootstrapPayload, validateLoginPayload } = require("../src/core/identity/validator");
+const {
+    validateBootstrapPayload,
+    validateLoginPayload,
+    validateChangePasswordPayload
+} = require("../src/core/identity/validator");
 const { hashSessionToken } = require("../src/core/identity/service");
 
 async function main() {
@@ -19,6 +23,14 @@ async function main() {
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     if (!await argon2.verify(hash, password)) throw new Error("Argon2id-Verifikation fehlgeschlagen.");
 
+    const changePassword = validateChangePasswordPayload({
+        current_password: "AktuellesPasswort!2026",
+        new_password: "NeuesPasswort!2026",
+        revoke_other_sessions: true
+    });
+    if (changePassword.error) throw new Error(changePassword.error);
+    if (!changePassword.value.revokeOtherSessions) throw new Error("Session-Widerruf beim Passwortwechsel wurde nicht korrekt validiert.");
+
     const tokenHashA = hashSessionToken("session-token");
     const tokenHashB = hashSessionToken("session-token");
     if (tokenHashA !== tokenHashB || tokenHashA === "session-token") throw new Error("Session-Token-Hashing fehlgeschlagen.");
@@ -27,7 +39,8 @@ async function main() {
         ok: true,
         emailNormalization: true,
         argon2id: true,
-        sessionTokenHashing: true
+        sessionTokenHashing: true,
+        passwordChangeValidation: true
     }, null, 2));
 }
 

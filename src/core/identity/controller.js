@@ -15,6 +15,21 @@ async function login(req, res) {
     }
 }
 
+async function changePassword(req, res) {
+    try {
+        const result = await identityService.changePassword(
+            req.auth.user.id,
+            req.auth.session.id,
+            req.body
+        );
+        if (result.error) return res.status(result.status || 400).json({ error: result.error });
+        res.json(result);
+    } catch (error) {
+        console.error("Fehler bei POST /auth/change-password:", error.message);
+        res.status(500).json({ error: "Passwort konnte nicht geändert werden." });
+    }
+}
+
 async function logout(req, res) {
     try {
         await identityService.logout(req.authToken);
@@ -49,4 +64,4 @@ async function revokeSession(req, res) {
     }
 }
 
-module.exports = { login, logout, me, sessions, revokeSession };
+module.exports = { login, changePassword, logout, me, sessions, revokeSession };
