@@ -36,13 +36,13 @@ async function mapRecipeWithIngredientLinks(recipe) {
     };
 }
 
-async function getAllRecipes() {
-    const rows = await recipeRepository.findAll();
+async function getAllRecipes(workspaceId) {
+    const rows = await recipeRepository.findAll(workspaceId);
     return rows.map(normalizeRecipeRow);
 }
 
-async function getRecipeById(recipeId) {
-    const recipe = await recipeRepository.findById(recipeId);
+async function getRecipeById(recipeId, workspaceId) {
+    const recipe = await recipeRepository.findById(recipeId, workspaceId);
 
     if (!recipe) {
         return null;
@@ -51,7 +51,7 @@ async function getRecipeById(recipeId) {
     return mapRecipeWithIngredientLinks(recipe);
 }
 
-async function createRecipe(payload) {
+async function createRecipe(payload, workspaceId, ownerUserId) {
     const validation = validateRecipePayload(payload);
 
     if (validation.error) {
@@ -60,7 +60,7 @@ async function createRecipe(payload) {
         };
     }
 
-    const recipe = await recipeRepository.create(validation.value);
+    const recipe = await recipeRepository.create(validation.value, workspaceId, ownerUserId);
 
     return {
         value: await mapRecipeWithIngredientLinks(recipe),
@@ -68,8 +68,8 @@ async function createRecipe(payload) {
     };
 }
 
-async function updateRecipe(recipeId, payload) {
-    const current = await recipeRepository.findById(recipeId);
+async function updateRecipe(recipeId, payload, workspaceId) {
+    const current = await recipeRepository.findById(recipeId, workspaceId);
 
     if (!current) {
         return {
@@ -105,7 +105,8 @@ async function updateRecipe(recipeId, payload) {
         {
             ...validation.value,
             is_favorite: favoriteValue
-        }
+        },
+        workspaceId
     );
 
     const ingredientsChanged =
@@ -125,13 +126,14 @@ async function updateRecipe(recipeId, payload) {
     };
 }
 
-async function updateRecipeFavorite(recipeId, isFavorite) {
+async function updateRecipeFavorite(recipeId, isFavorite, workspaceId) {
     const favoriteValue =
         Number(isFavorite) === 1 ? 1 : 0;
 
     const result = await recipeRepository.updateFavorite(
         recipeId,
-        favoriteValue
+        favoriteValue,
+        workspaceId
     );
 
     if (result.changes === 0) {
@@ -144,10 +146,13 @@ async function updateRecipeFavorite(recipeId, isFavorite) {
     };
 }
 
-async function deleteRecipe(recipeId) {
+async function deleteRecipe(recipeId, workspaceId) {
+    const current = await recipeRepository.findById(recipeId, workspaceId);
+    if (!current) return false;
+
     await recipeRepository.deleteIngredients(recipeId);
 
-    const result = await recipeRepository.deleteById(recipeId);
+    const result = await recipeRepository.deleteById(recipeId, workspaceId);
 
     return result.changes > 0;
 }

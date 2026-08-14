@@ -2,7 +2,7 @@ const recipeService = require("./service");
 
 async function getAllRecipes(req, res) {
     try {
-        const recipes = await recipeService.getAllRecipes();
+        const recipes = await recipeService.getAllRecipes(req.workspaceId);
         res.json(recipes);
     } catch (error) {
         console.error("Fehler bei GET /recipes:", error.message);
@@ -14,7 +14,7 @@ async function getAllRecipes(req, res) {
 
 async function getRecipeById(req, res) {
     try {
-        const recipe = await recipeService.getRecipeById(req.params.id);
+        const recipe = await recipeService.getRecipeById(req.params.id, req.workspaceId);
 
         if (!recipe) {
             return res.status(404).json({
@@ -35,7 +35,8 @@ async function updateRecipeFavorite(req, res) {
     try {
         const result = await recipeService.updateRecipeFavorite(
             req.params.id,
-            req.body.is_favorite
+            req.body.is_favorite,
+            req.workspaceId
         );
 
         if (!result) {
@@ -59,7 +60,7 @@ async function updateRecipeFavorite(req, res) {
 
 async function deleteRecipe(req, res) {
     try {
-        const deleted = await recipeService.deleteRecipe(req.params.id);
+        const deleted = await recipeService.deleteRecipe(req.params.id, req.workspaceId);
 
         if (!deleted) {
             return res.status(404).json({

@@ -1,11 +1,19 @@
 const express = require("express");
 const recipeQueryService = require("./queryService");
+const { requireAuthentication } = require("../../core/identity/middleware");
+const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
 
 const router = express.Router();
 
+router.use(requireAuthentication);
+router.use(requireWorkspaceContext);
+
 router.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
     try {
-        const result = await recipeQueryService.getRecipesByFoodItem(req.params.foodItemId);
+        const result = await recipeQueryService.getRecipesByFoodItem(
+            req.params.foodItemId,
+            req.workspaceId
+        );
         if (result.error) return res.status(result.status || 400).json({ error: result.error });
         res.json(result.value);
     } catch (error) {
@@ -16,7 +24,10 @@ router.get("/recipes/by-food-item/:foodItemId", async (req, res) => {
 
 router.get("/recipes/by-ingredient/:name", async (req, res) => {
     try {
-        const result = await recipeQueryService.getRecipesByIngredient(req.params.name);
+        const result = await recipeQueryService.getRecipesByIngredient(
+            req.params.name,
+            req.workspaceId
+        );
         if (result.error) return res.status(result.status || 400).json({ error: result.error });
         res.json(result.value);
     } catch (error) {
@@ -27,7 +38,11 @@ router.get("/recipes/by-ingredient/:name", async (req, res) => {
 
 router.get("/recipes/:id/stock-check", async (req, res) => {
     try {
-        const result = await recipeQueryService.getRecipeStockCheck(req.params.id, req.query.portions);
+        const result = await recipeQueryService.getRecipeStockCheck(
+            req.params.id,
+            req.query.portions,
+            req.workspaceId
+        );
         if (result.notFound) return res.status(404).json({ error: "Rezept nicht gefunden" });
         res.json(result.value);
     } catch (error) {

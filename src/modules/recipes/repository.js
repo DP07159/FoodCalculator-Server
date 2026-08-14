@@ -1,33 +1,48 @@
 const { run, get, all } = require("../../database/database");
 
-async function findAll() {
-    return all(`
-        SELECT *
-        FROM recipes
-        ORDER BY name COLLATE NOCASE ASC
-    `);
-}
-
-async function findById(recipeId) {
-    return get(
-        `SELECT * FROM recipes WHERE id = ?`,
-        [recipeId]
+async function findAll(workspaceId) {
+    return all(
+        `SELECT *
+         FROM recipes
+         WHERE workspace_id = ?
+           AND visibility <> 'archived'
+         ORDER BY name COLLATE NOCASE ASC`,
+        [workspaceId]
     );
 }
 
-async function create(recipe) {
+async function findById(recipeId, workspaceId) {
+    return get(
+        `SELECT *
+         FROM recipes
+         WHERE id = ?
+           AND workspace_id = ?
+         LIMIT 1`,
+        [recipeId, workspaceId]
+    );
+}
+
+async function create(recipe, workspaceId, ownerUserId) {
     const result = await run(
         `INSERT INTO recipes (
+            workspace_id,
+            owner_user_id,
             name,
             calories,
             portions,
             mealTypes,
             ingredients,
             instructions,
-            is_favorite
+            is_favorite,
+            visibility,
+            version,
+            created_at,
+            updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'workspace', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         [
+            workspaceId,
+            ownerUserId,
             recipe.name,
             recipe.calories,
             recipe.portions,
@@ -38,10 +53,10 @@ async function create(recipe) {
         ]
     );
 
-    return findById(result.lastID);
+    return findById(result.lastID, workspaceId);
 }
 
-async function update(recipeId, recipe) {
+async function update(recipeId, recipe, workspaceId) {
     await run(
         `UPDATE recipes
          SET
@@ -51,8 +66,11 @@ async function update(recipeId, recipe) {
             mealTypes = ?,
             ingredients = ?,
             instructions = ?,
-            is_favorite = ?
-         WHERE id = ?`,
+            is_favorite = ?,
+            version = COALESCE(version, 1) + 1,
+            updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND workspace_id = ?`,
         [
             recipe.name,
             recipe.calories,
@@ -61,19 +79,23 @@ async function update(recipeId, recipe) {
             recipe.ingredients,
             recipe.instructions,
             recipe.is_favorite,
-            recipeId
+            recipeId,
+            workspaceId
         ]
     );
 
-    return findById(recipeId);
+    return findById(recipeId, workspaceId);
 }
 
-async function updateFavorite(recipeId, isFavorite) {
+async function updateFavorite(recipeId, isFavorite, workspaceId) {
     return run(
         `UPDATE recipes
-         SET is_favorite = ?
-         WHERE id = ?`,
-        [isFavorite, recipeId]
+         SET is_favorite = ?,
+             version = COALESCE(version, 1) + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND workspace_id = ?`,
+        [isFavorite, recipeId, workspaceId]
     );
 }
 
@@ -84,10 +106,12 @@ async function deleteIngredients(recipeId) {
     );
 }
 
-async function deleteById(recipeId) {
+async function deleteById(recipeId, workspaceId) {
     return run(
-        `DELETE FROM recipes WHERE id = ?`,
-        [recipeId]
+        `DELETE FROM recipes
+         WHERE id = ?
+           AND workspace_id = ?`,
+        [recipeId, workspaceId]
     );
 }
 

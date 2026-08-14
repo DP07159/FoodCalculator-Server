@@ -117,24 +117,27 @@ function hasExplicitIngredientLinksPayload(payload) {
     return Object.prototype.hasOwnProperty.call(payload || {}, "ingredientLinks") && Array.isArray(payload.ingredientLinks);
 }
 
-async function createRecipe(payload) {
+async function createRecipe(payload, workspaceId, ownerUserId) {
     const validation = validateRecipePayload(payload);
     if (validation.error) return { error: validation.error };
     const recipe = validation.value;
 
     const result = await run(
-        `INSERT INTO recipes (name, calories, portions, mealTypes, ingredients, instructions, is_favorite)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, recipe.is_favorite]
+        `INSERT INTO recipes (
+            workspace_id, owner_user_id, name, calories, portions, mealTypes,
+            ingredients, instructions, is_favorite, visibility, version, created_at, updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'workspace', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [workspaceId, ownerUserId, recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, recipe.is_favorite]
     );
 
-    const created = await get(`SELECT * FROM recipes WHERE id = ?`, [result.lastID]);
+    const created = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [result.lastID, workspaceId]);
     await recipeSyncService.syncRecipeIngredients(created.id, created.ingredients || "", recipe.ingredientLinks);
     return { value: await normalizeRecipeRowWithIngredientLinks(created) };
 }
 
-async function updateRecipe(recipeId, payload) {
-    const current = await get(`SELECT * FROM recipes WHERE id = ?`, [recipeId]);
+async function updateRecipe(recipeId, payload, workspaceId) {
+    const current = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
     if (!current) return { notFound: true };
 
     const validation = validateRecipePayload({
@@ -150,12 +153,14 @@ async function updateRecipe(recipeId, payload) {
 
     await run(
         `UPDATE recipes
-         SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?
-         WHERE id = ?`,
-        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, favoriteValue, recipeId]
+         SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?,
+             version = COALESCE(version, 1) + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND workspace_id = ?`,
+        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, favoriteValue, recipeId, workspaceId]
     );
 
-    const updated = await get(`SELECT * FROM recipes WHERE id = ?`, [recipeId]);
+    const updated = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
     const ingredientsChanged = normalizeIngredientsTextForChangeCheck(current.ingredients) !== normalizeIngredientsTextForChangeCheck(updated.ingredients);
     const explicitLinksProvided = hasExplicitIngredientLinksPayload(payload);
 
