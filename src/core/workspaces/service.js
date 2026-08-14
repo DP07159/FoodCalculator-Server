@@ -49,21 +49,38 @@ async function listWorkspacesForUser(userId) {
     return rows.map(mapWorkspace);
 }
 
-async function resolveWorkspaceForUser(userId, requestedPublicId = "") {
+async function resolveWorkspaceRecordForUser(userId, requestedPublicId = "") {
     const requested = String(requestedPublicId || "").trim();
 
     if (requested) {
-        const row = await repository.findActiveWorkspaceForUserByPublicId(userId, requested);
-        return row ? mapWorkspace(row) : null;
+        return repository.findActiveWorkspaceForUserByPublicId(userId, requested);
     }
 
     const personal = await repository.findActivePersonalWorkspaceForUser(userId);
-    if (personal) return mapWorkspace(personal);
+    if (personal) return personal;
 
     const allWorkspaces = await repository.listActiveWorkspacesForUser(userId);
-    if (allWorkspaces.length === 1) return mapWorkspace(allWorkspaces[0]);
+    if (allWorkspaces.length === 1) return allWorkspaces[0];
 
     return null;
+}
+
+async function resolveWorkspaceForUser(userId, requestedPublicId = "") {
+    const row = await resolveWorkspaceRecordForUser(userId, requestedPublicId);
+    return row ? mapWorkspace(row) : null;
+}
+
+async function resolveWorkspaceContextForUser(userId, requestedPublicId = "") {
+    const row = await resolveWorkspaceRecordForUser(userId, requestedPublicId);
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        workspaceId: row.id,
+        workspace: mapWorkspace(row)
+    };
 }
 
 async function bootstrapPersonalWorkspaces(options = {}) {
@@ -88,6 +105,8 @@ async function bootstrapPersonalWorkspaces(options = {}) {
 module.exports = {
     ensurePersonalWorkspaceForUser,
     listWorkspacesForUser,
+    resolveWorkspaceRecordForUser,
     resolveWorkspaceForUser,
+    resolveWorkspaceContextForUser,
     bootstrapPersonalWorkspaces
 };

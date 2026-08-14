@@ -15,12 +15,12 @@ async function requireWorkspaceContext(req, res, next) {
         }
 
         const requestedPublicId = getRequestedWorkspacePublicId(req);
-        const workspace = await service.resolveWorkspaceForUser(
+        const context = await service.resolveWorkspaceContextForUser(
             req.auth.user.id,
             requestedPublicId
         );
 
-        if (!workspace) {
+        if (!context) {
             return res.status(requestedPublicId ? 403 : 409).json({
                 error: requestedPublicId
                     ? "Workspace ist nicht verfügbar oder keine aktive Mitgliedschaft vorhanden."
@@ -28,7 +28,8 @@ async function requireWorkspaceContext(req, res, next) {
             });
         }
 
-        req.workspace = workspace;
+        req.workspaceId = context.workspaceId;
+        req.workspace = context.workspace;
         next();
     } catch (error) {
         next(error);

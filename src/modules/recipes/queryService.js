@@ -165,7 +165,7 @@ function buildRecipeStockEntry(parsedIngredient, inventoryItems, factor) {
     };
 }
 
-async function getRecipesByFoodItem(foodItemId) {
+async function getRecipesByFoodItem(foodItemId, workspaceId) {
     const id = Number.parseInt(foodItemId, 10);
     if (!Number.isInteger(id) || id <= 0) return { error: "Gültige food_item_id ist erforderlich.", status: 400 };
 
@@ -183,9 +183,13 @@ async function getRecipesByFoodItem(foodItemId) {
             ri.sort_order AS ingredient_sort_order
         FROM recipe_ingredients ri
         INNER JOIN recipes r ON r.id = ri.recipe_id
+        INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
         WHERE ri.food_item_id = ?
+          AND rwa.workspace_id = ?
+          AND r.visibility <> 'archived'
         ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
-    `, [id]);
+    `, [id, workspaceId]);
 
     const recipeMap = new Map();
     for (const row of rows) {
@@ -210,11 +214,20 @@ async function getRecipesByFoodItem(foodItemId) {
     };
 }
 
-async function getRecipesByIngredient(name) {
+async function getRecipesByIngredient(name, workspaceId) {
     const ingredientName = normalizeIngredientText(name || "");
     if (!ingredientName) return { error: "Lebensmittelname ist erforderlich.", status: 400 };
 
-    const recipes = await all(`SELECT * FROM recipes ORDER BY name COLLATE NOCASE ASC`);
+    const recipes = await all(
+        `SELECT DISTINCT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE rwa.workspace_id = ?
+           AND r.visibility <> 'archived'
+         ORDER BY r.name COLLATE NOCASE ASC`,
+        [workspaceId]
+    );
     const matches = [];
     for (const recipe of recipes) {
         const parsed = parseIngredientsText(recipe.ingredients || "");
@@ -234,8 +247,17 @@ async function getRecipesByIngredient(name) {
     return { value: { ingredient: ingredientName, recipes: matches } };
 }
 
-async function getRecipeStockCheck(recipeId, portions) {
-    const recipe = await get(`SELECT * FROM recipes WHERE id = ?`, [recipeId]);
+async function getRecipeStockCheck(recipeId, portions, workspaceId) {
+    const recipe = await get(
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
+         LIMIT 1`,
+        [recipeId, workspaceId]
+    );
     if (!recipe) return { notFound: true };
 
     const requestedPortions = Number.parseInt(portions, 10);
