@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const repository = require("./repository");
-const { mapWorkspace } = require("./mapper");
+const { mapWorkspace, mapMembership } = require("./mapper");
 const { normalizeWorkspaceName } = require("./validator");
 
 async function ensurePersonalWorkspaceForUser(user, options = {}) {
@@ -39,7 +39,8 @@ async function ensurePersonalWorkspaceForUser(user, options = {}) {
             ...workspace,
             membership_status: membership.status,
             is_owner: membership.is_owner
-        })
+        }),
+        membership: mapMembership(membership)
     };
 }
 

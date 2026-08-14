@@ -201,5 +201,6 @@ module.exports = {
     logout,
     listSessions,
     revokeOwnSession,
-    hashSessionToken
+    hashSessionToken,
+    hashPassword
 };

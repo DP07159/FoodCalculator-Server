@@ -32,6 +32,45 @@ async function hasPrivilege(userId, workspacePublicId, privilegeCode) {
     );
 }
 
+
+async function assignRoleWithDefaults({
+    membershipId,
+    roleCode,
+    assignedByUserId
+}) {
+    const role = await repository.findRoleByCode(roleCode);
+    if (!role) {
+        throw new Error(`Systemrolle ${roleCode} fehlt.`);
+    }
+
+    await repository.assignRole({
+        membershipId,
+        roleId: role.id,
+        assignedByUserId
+    });
+
+    const defaultCapabilities =
+        await repository.listDefaultCapabilitiesForRole(role.id);
+
+    for (const capability of defaultCapabilities) {
+        await repository.assignCapability({
+            membershipId,
+            capabilityId: capability.id,
+            assignedByUserId,
+            source: "role_default"
+        });
+    }
+
+    return {
+        role: { code: role.code, name: role.name, scope: role.scope },
+        capabilities: defaultCapabilities.map(capability => ({
+            code: capability.code,
+            name: capability.name,
+            module_code: capability.module_code
+        }))
+    };
+}
+
 async function bootstrapOwnerAuthorization() {
     const ownerMemberships = await repository.listOwnerMemberships();
     const tenantAdminRole = await repository.findRoleByCode("tenant_admin");
@@ -46,20 +85,11 @@ async function bootstrapOwnerAuthorization() {
     const results = [];
 
     for (const membership of ownerMemberships) {
-        await repository.assignRole({
+        await assignRoleWithDefaults({
             membershipId: membership.membership_id,
-            roleId: tenantAdminRole.id,
+            roleCode: "tenant_admin",
             assignedByUserId: membership.user_id
         });
-
-        for (const capability of defaultCapabilities) {
-            await repository.assignCapability({
-                membershipId: membership.membership_id,
-                capabilityId: capability.id,
-                assignedByUserId: membership.user_id,
-                source: "role_default"
-            });
-        }
 
         results.push({
             user: {
@@ -82,5 +112,6 @@ async function bootstrapOwnerAuthorization() {
 module.exports = {
     getEffectiveAuthorization,
     hasPrivilege,
-    bootstrapOwnerAuthorization
+    bootstrapOwnerAuthorization,
+    assignRoleWithDefaults
 };

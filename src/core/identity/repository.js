@@ -26,6 +26,48 @@ async function createUser({ publicId, email, displayName, status = "active", loc
     return findUserById(result.lastID);
 }
 
+
+function listUsersForAdministration() {
+    return all(
+        `SELECT
+            u.id,
+            u.public_id,
+            u.email,
+            u.display_name,
+            u.status,
+            u.locale,
+            u.created_at,
+            u.updated_at,
+            w.public_id AS workspace_public_id,
+            w.name AS workspace_name,
+            wm.status AS membership_status,
+            wm.is_owner,
+            GROUP_CONCAT(DISTINCT r.code) AS role_codes
+         FROM users u
+         LEFT JOIN workspaces w
+                ON w.owner_user_id = u.id
+               AND w.workspace_type = 'personal'
+               AND w.archived_at IS NULL
+         LEFT JOIN workspace_memberships wm
+                ON wm.workspace_id = w.id
+               AND wm.user_id = u.id
+         LEFT JOIN membership_roles mr ON mr.membership_id = wm.id
+         LEFT JOIN roles r ON r.id = mr.role_id
+         WHERE u.deleted_at IS NULL
+         GROUP BY u.id, w.id, wm.id
+         ORDER BY u.display_name COLLATE NOCASE ASC, u.id ASC`
+    );
+}
+
+function updateUserStatus(userId, status) {
+    return run(
+        `UPDATE users
+         SET status = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND deleted_at IS NULL`,
+        [status, userId]
+    );
+}
+
 function findCredential(userId, credentialType = "password") {
     return get(
         `SELECT * FROM user_credentials WHERE user_id = ? AND credential_type = ? LIMIT 1`,
@@ -179,6 +221,8 @@ module.exports = {
     findUserByPublicId,
     findUserByEmail,
     createUser,
+    listUsersForAdministration,
+    updateUserStatus,
     findCredential,
     createPasswordCredential,
     updatePasswordCredential,
