@@ -25,7 +25,11 @@
     "users:set-role": "node scripts/set-user-role.js",
     "users:grant-capability": "node scripts/grant-user-capability.js",
     "users:revoke-capability": "node scripts/revoke-user-capability.js",
-    "test:access-management": "node tests/access-management.test.js"
+    "test:access-management": "node tests/access-management.test.js",
+    "workspaces:create-family": "node scripts/create-family-workspace.js",
+    "workspaces:add-family-member": "node scripts/add-family-member.js",
+    "recipes:assign-legacy": "node scripts/assign-legacy-recipes.js",
+    "test:recipe-workspace": "node tests/recipe-workspace.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",

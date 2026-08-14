@@ -42,6 +42,12 @@ async function ensureSchema() {
     await addColumnIfMissing("recipes", "instructions", "TEXT DEFAULT ''");
     await addColumnIfMissing("recipes", "portions", "INTEGER");
     await addColumnIfMissing("recipes", "is_favorite", "INTEGER DEFAULT 0");
+    await addColumnIfMissing("recipes", "workspace_id", "INTEGER REFERENCES workspaces(id)");
+    await addColumnIfMissing("recipes", "owner_user_id", "INTEGER REFERENCES users(id)");
+    await addColumnIfMissing("recipes", "visibility", "TEXT DEFAULT 'workspace'");
+    await addColumnIfMissing("recipes", "version", "INTEGER DEFAULT 1");
+    await addColumnIfMissing("recipes", "created_at", "DATETIME");
+    await addColumnIfMissing("recipes", "updated_at", "DATETIME");
 
     await run(`
         CREATE TABLE IF NOT EXISTS recipe_ingredients (
