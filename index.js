@@ -50,6 +50,20 @@ async function ensureSchema() {
     await addColumnIfMissing("recipes", "updated_at", "DATETIME");
 
     await run(`
+        CREATE TABLE IF NOT EXISTS recipe_workspace_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL,
+            workspace_id INTEGER NOT NULL,
+            assigned_by_user_id INTEGER,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(recipe_id, workspace_id),
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+            FOREIGN KEY (assigned_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+    `);
+
+    await run(`
         CREATE TABLE IF NOT EXISTS recipe_ingredients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             recipe_id INTEGER NOT NULL,
