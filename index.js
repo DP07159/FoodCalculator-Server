@@ -9,6 +9,7 @@ const foodItemService = require("./src/modules/foodItems/service");
 const inventoryService = require("./src/modules/inventory/service");
 const inventoryRoutes = require("./src/modules/inventory/routes");
 const mealPlanRoutes = require("./src/modules/mealPlans/routes");
+const recipeRoutes = require("./src/modules/recipes/routes");
 const recipeQueryRoutes = require("./src/modules/recipes/queryRoutes");
 const recipeWriteRoutes = require("./src/modules/recipes/writeRoutes");
 const recipeSyncService = require("./src/modules/recipes/syncService");
@@ -42,6 +43,26 @@ async function ensureSchema() {
     await addColumnIfMissing("recipes", "instructions", "TEXT DEFAULT ''");
     await addColumnIfMissing("recipes", "portions", "INTEGER");
     await addColumnIfMissing("recipes", "is_favorite", "INTEGER DEFAULT 0");
+    await addColumnIfMissing("recipes", "workspace_id", "INTEGER REFERENCES workspaces(id)");
+    await addColumnIfMissing("recipes", "owner_user_id", "INTEGER REFERENCES users(id)");
+    await addColumnIfMissing("recipes", "visibility", "TEXT DEFAULT 'workspace'");
+    await addColumnIfMissing("recipes", "version", "INTEGER DEFAULT 1");
+    await addColumnIfMissing("recipes", "created_at", "DATETIME");
+    await addColumnIfMissing("recipes", "updated_at", "DATETIME");
+
+    await run(`
+        CREATE TABLE IF NOT EXISTS recipe_workspace_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL,
+            workspace_id INTEGER NOT NULL,
+            assigned_by_user_id INTEGER,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(recipe_id, workspace_id),
+            FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+            FOREIGN KEY (assigned_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+        )
+    `);
 
     await run(`
         CREATE TABLE IF NOT EXISTS recipe_ingredients (
@@ -274,6 +295,7 @@ app.get("/check-db", async (req, res) => {
 
 app.use(inventoryRoutes);
 app.use(mealPlanRoutes);
+app.use("/recipes", recipeRoutes);
 app.use(recipeQueryRoutes);
 app.use(recipeWriteRoutes);
 app.use(adminRoutes);
