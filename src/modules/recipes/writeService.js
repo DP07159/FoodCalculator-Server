@@ -131,13 +131,43 @@ async function createRecipe(payload, workspaceId, ownerUserId) {
         [workspaceId, ownerUserId, recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, recipe.is_favorite]
     );
 
-    const created = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [result.lastID, workspaceId]);
+    await run(
+        `INSERT INTO recipe_workspace_assignments (
+            recipe_id,
+            workspace_id,
+            assigned_by_user_id
+         )
+         VALUES (?, ?, ?)
+         ON CONFLICT(recipe_id, workspace_id)
+         DO NOTHING`,
+        [result.lastID, workspaceId, ownerUserId]
+    );
+
+    const created = await get(
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
+         LIMIT 1`,
+        [result.lastID, workspaceId]
+    );
     await recipeSyncService.syncRecipeIngredients(created.id, created.ingredients || "", recipe.ingredientLinks);
     return { value: await normalizeRecipeRowWithIngredientLinks(created) };
 }
 
 async function updateRecipe(recipeId, payload, workspaceId) {
-    const current = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
+    const current = await get(
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
+         LIMIT 1`,
+        [recipeId, workspaceId]
+    );
     if (!current) return { notFound: true };
 
     const validation = validateRecipePayload({
@@ -156,11 +186,20 @@ async function updateRecipe(recipeId, payload, workspaceId) {
          SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?,
              version = COALESCE(version, 1) + 1,
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND workspace_id = ?`,
-        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, favoriteValue, recipeId, workspaceId]
+         WHERE id = ?`,
+        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, favoriteValue, recipeId]
     );
 
-    const updated = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
+    const updated = await get(
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
+         LIMIT 1`,
+        [recipeId, workspaceId]
+    );
     const ingredientsChanged = normalizeIngredientsTextForChangeCheck(current.ingredients) !== normalizeIngredientsTextForChangeCheck(updated.ingredients);
     const explicitLinksProvided = hasExplicitIngredientLinksPayload(payload);
 

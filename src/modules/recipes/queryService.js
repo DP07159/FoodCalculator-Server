@@ -183,8 +183,10 @@ async function getRecipesByFoodItem(foodItemId, workspaceId) {
             ri.sort_order AS ingredient_sort_order
         FROM recipe_ingredients ri
         INNER JOIN recipes r ON r.id = ri.recipe_id
+        INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
         WHERE ri.food_item_id = ?
-          AND r.workspace_id = ?
+          AND rwa.workspace_id = ?
           AND r.visibility <> 'archived'
         ORDER BY r.name COLLATE NOCASE ASC, ri.sort_order ASC, ri.id ASC
     `, [id, workspaceId]);
@@ -216,7 +218,16 @@ async function getRecipesByIngredient(name, workspaceId) {
     const ingredientName = normalizeIngredientText(name || "");
     if (!ingredientName) return { error: "Lebensmittelname ist erforderlich.", status: 400 };
 
-    const recipes = await all(`SELECT * FROM recipes WHERE workspace_id = ? AND visibility <> 'archived' ORDER BY name COLLATE NOCASE ASC`, [workspaceId]);
+    const recipes = await all(
+        `SELECT DISTINCT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE rwa.workspace_id = ?
+           AND r.visibility <> 'archived'
+         ORDER BY r.name COLLATE NOCASE ASC`,
+        [workspaceId]
+    );
     const matches = [];
     for (const recipe of recipes) {
         const parsed = parseIngredientsText(recipe.ingredients || "");
@@ -237,7 +248,16 @@ async function getRecipesByIngredient(name, workspaceId) {
 }
 
 async function getRecipeStockCheck(recipeId, portions, workspaceId) {
-    const recipe = await get(`SELECT * FROM recipes WHERE id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
+    const recipe = await get(
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
+         LIMIT 1`,
+        [recipeId, workspaceId]
+    );
     if (!recipe) return { notFound: true };
 
     const requestedPortions = Number.parseInt(portions, 10);

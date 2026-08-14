@@ -1,4 +1,5 @@
 const recipeService = require("./service");
+const workspaceAssignmentService = require("./workspaceAssignmentService");
 
 async function getAllRecipes(req, res) {
     try {
@@ -14,7 +15,7 @@ async function getAllRecipes(req, res) {
 
 async function getRecipeById(req, res) {
     try {
-        const recipe = await recipeService.getRecipeById(req.params.id, req.workspaceId);
+        const recipe = await recipeService.getRecipeById(req.params.id, req.workspaceId, req.auth.user.id);
 
         if (!recipe) {
             return res.status(404).json({
@@ -138,11 +139,75 @@ async function updateRecipe(req, res) {
     }
 }
 
+
+async function getWorkspaceAssignments(req, res) {
+    try {
+        const result = await workspaceAssignmentService.getAssignmentOptions({
+            recipeId: req.params.id,
+            currentWorkspaceId: req.workspaceId,
+            userId: req.auth.user.id
+        });
+
+        if (result.notFound) {
+            return res.status(404).json({ error: "Rezept nicht gefunden" });
+        }
+
+        if (result.forbidden) {
+            return res.status(403).json({ error: result.error });
+        }
+
+        res.json(result.value);
+    } catch (error) {
+        console.error(
+            "Fehler bei GET /recipes/:id/workspace-assignments:",
+            error.message
+        );
+        res.status(500).json({
+            error: "Workspace-Zuordnungen konnten nicht geladen werden."
+        });
+    }
+}
+
+async function updateWorkspaceAssignments(req, res) {
+    try {
+        const result = await workspaceAssignmentService.setAssignments({
+            recipeId: req.params.id,
+            currentWorkspaceId: req.workspaceId,
+            userId: req.auth.user.id,
+            workspacePublicIds: req.body.workspace_public_ids
+        });
+
+        if (result.notFound) {
+            return res.status(404).json({ error: "Rezept nicht gefunden" });
+        }
+
+        if (result.forbidden) {
+            return res.status(403).json({ error: result.error });
+        }
+
+        if (result.error) {
+            return res.status(400).json({ error: result.error });
+        }
+
+        res.json(result.value);
+    } catch (error) {
+        console.error(
+            "Fehler bei PUT /recipes/:id/workspace-assignments:",
+            error.message
+        );
+        res.status(500).json({
+            error: "Workspace-Zuordnungen konnten nicht gespeichert werden."
+        });
+    }
+}
+
 module.exports = {
     getAllRecipes,
     getRecipeById,
     createRecipe,
     updateRecipe,
     updateRecipeFavorite,
-    deleteRecipe
+    deleteRecipe,
+    getWorkspaceAssignments,
+    updateWorkspaceAssignments
 };

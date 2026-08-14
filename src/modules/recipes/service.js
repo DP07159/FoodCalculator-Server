@@ -27,11 +27,16 @@ function hasExplicitIngredientLinksPayload(payload) {
     );
 }
 
-async function mapRecipeWithIngredientLinks(recipe) {
+async function mapRecipeWithIngredientLinks(recipe, userId = null) {
     const rows = await recipeRepository.findIngredientLinks(recipe.id);
 
     return {
-        ...normalizeRecipeRow(recipe),
+        ...normalizeRecipeRow({
+            ...recipe,
+            can_manage_workspace_assignments:
+                userId !== null &&
+                Number(recipe.owner_user_id) === Number(userId)
+        }),
         ingredientLinks: normalizeIngredientLinks(rows)
     };
 }
@@ -41,14 +46,14 @@ async function getAllRecipes(workspaceId) {
     return rows.map(normalizeRecipeRow);
 }
 
-async function getRecipeById(recipeId, workspaceId) {
+async function getRecipeById(recipeId, workspaceId, userId = null) {
     const recipe = await recipeRepository.findById(recipeId, workspaceId);
 
     if (!recipe) {
         return null;
     }
 
-    return mapRecipeWithIngredientLinks(recipe);
+    return mapRecipeWithIngredientLinks(recipe, userId);
 }
 
 async function createRecipe(payload, workspaceId, ownerUserId) {
@@ -63,7 +68,7 @@ async function createRecipe(payload, workspaceId, ownerUserId) {
     const recipe = await recipeRepository.create(validation.value, workspaceId, ownerUserId);
 
     return {
-        value: await mapRecipeWithIngredientLinks(recipe),
+        value: await mapRecipeWithIngredientLinks(recipe, ownerUserId),
         ingredientLinks: validation.value.ingredientLinks
     };
 }
@@ -150,9 +155,24 @@ async function deleteRecipe(recipeId, workspaceId) {
     const current = await recipeRepository.findById(recipeId, workspaceId);
     if (!current) return false;
 
-    await recipeRepository.deleteIngredients(recipeId);
+    await recipeRepository.removeWorkspaceAssignment(recipeId, workspaceId);
 
-    const result = await recipeRepository.deleteById(recipeId, workspaceId);
+    const remainingAssignments =
+        await recipeRepository.countWorkspaceAssignments(recipeId);
+
+    if (remainingAssignments > 0) {
+        const remaining = await recipeRepository.listWorkspaceAssignments(recipeId);
+        if (remaining[0]?.workspace_id) {
+            await recipeRepository.updateLegacyWorkspaceId(
+                recipeId,
+                remaining[0].workspace_id
+            );
+        }
+        return true;
+    }
+
+    await recipeRepository.deleteIngredients(recipeId);
+    const result = await recipeRepository.deleteById(recipeId);
 
     return result.changes > 0;
 }

@@ -2,21 +2,25 @@ const { run, get, all } = require("../../database/database");
 
 async function findAll(workspaceId) {
     return all(
-        `SELECT *
-         FROM recipes
-         WHERE workspace_id = ?
-           AND visibility <> 'archived'
-         ORDER BY name COLLATE NOCASE ASC`,
+        `SELECT DISTINCT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE rwa.workspace_id = ?
+           AND r.visibility <> 'archived'
+         ORDER BY r.name COLLATE NOCASE ASC`,
         [workspaceId]
     );
 }
 
 async function findById(recipeId, workspaceId) {
     return get(
-        `SELECT *
-         FROM recipes
-         WHERE id = ?
-           AND workspace_id = ?
+        `SELECT r.*
+         FROM recipes r
+         INNER JOIN recipe_workspace_assignments rwa
+            ON rwa.recipe_id = r.id
+         WHERE r.id = ?
+           AND rwa.workspace_id = ?
          LIMIT 1`,
         [recipeId, workspaceId]
     );
@@ -53,10 +57,19 @@ async function create(recipe, workspaceId, ownerUserId) {
         ]
     );
 
+    await addWorkspaceAssignment({
+        recipeId: result.lastID,
+        workspaceId,
+        assignedByUserId: ownerUserId
+    });
+
     return findById(result.lastID, workspaceId);
 }
 
 async function update(recipeId, recipe, workspaceId) {
+    const visible = await findById(recipeId, workspaceId);
+    if (!visible) return null;
+
     await run(
         `UPDATE recipes
          SET
@@ -69,8 +82,7 @@ async function update(recipeId, recipe, workspaceId) {
             is_favorite = ?,
             version = COALESCE(version, 1) + 1,
             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?
-           AND workspace_id = ?`,
+         WHERE id = ?`,
         [
             recipe.name,
             recipe.calories,
@@ -79,8 +91,7 @@ async function update(recipeId, recipe, workspaceId) {
             recipe.ingredients,
             recipe.instructions,
             recipe.is_favorite,
-            recipeId,
-            workspaceId
+            recipeId
         ]
     );
 
@@ -88,14 +99,16 @@ async function update(recipeId, recipe, workspaceId) {
 }
 
 async function updateFavorite(recipeId, isFavorite, workspaceId) {
+    const visible = await findById(recipeId, workspaceId);
+    if (!visible) return { changes: 0 };
+
     return run(
         `UPDATE recipes
          SET is_favorite = ?,
              version = COALESCE(version, 1) + 1,
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?
-           AND workspace_id = ?`,
-        [isFavorite, recipeId, workspaceId]
+         WHERE id = ?`,
+        [isFavorite, recipeId]
     );
 }
 
@@ -106,12 +119,10 @@ async function deleteIngredients(recipeId) {
     );
 }
 
-async function deleteById(recipeId, workspaceId) {
+async function deleteById(recipeId) {
     return run(
-        `DELETE FROM recipes
-         WHERE id = ?
-           AND workspace_id = ?`,
-        [recipeId, workspaceId]
+        `DELETE FROM recipes WHERE id = ?`,
+        [recipeId]
     );
 }
 
@@ -135,6 +146,76 @@ async function findIngredientLinks(recipeId) {
     );
 }
 
+async function listWorkspaceAssignments(recipeId) {
+    return all(
+        `SELECT
+            rwa.id,
+            rwa.recipe_id,
+            rwa.workspace_id,
+            rwa.assigned_by_user_id,
+            rwa.created_at,
+            w.public_id AS workspace_public_id,
+            w.name AS workspace_name,
+            w.workspace_type
+         FROM recipe_workspace_assignments rwa
+         INNER JOIN workspaces w
+            ON w.id = rwa.workspace_id
+         WHERE rwa.recipe_id = ?
+         ORDER BY
+            CASE WHEN w.workspace_type = 'personal' THEN 0 ELSE 1 END,
+            w.name COLLATE NOCASE ASC`,
+        [recipeId]
+    );
+}
+
+async function addWorkspaceAssignment({
+    recipeId,
+    workspaceId,
+    assignedByUserId
+}) {
+    return run(
+        `INSERT INTO recipe_workspace_assignments (
+            recipe_id,
+            workspace_id,
+            assigned_by_user_id
+         )
+         VALUES (?, ?, ?)
+         ON CONFLICT(recipe_id, workspace_id)
+         DO NOTHING`,
+        [recipeId, workspaceId, assignedByUserId]
+    );
+}
+
+async function removeWorkspaceAssignment(recipeId, workspaceId) {
+    return run(
+        `DELETE FROM recipe_workspace_assignments
+         WHERE recipe_id = ?
+           AND workspace_id = ?`,
+        [recipeId, workspaceId]
+    );
+}
+
+async function countWorkspaceAssignments(recipeId) {
+    const row = await get(
+        `SELECT COUNT(*) AS count
+         FROM recipe_workspace_assignments
+         WHERE recipe_id = ?`,
+        [recipeId]
+    );
+
+    return Number(row?.count) || 0;
+}
+
+async function updateLegacyWorkspaceId(recipeId, workspaceId) {
+    return run(
+        `UPDATE recipes
+         SET workspace_id = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [workspaceId, recipeId]
+    );
+}
+
 module.exports = {
     findAll,
     findById,
@@ -143,5 +224,10 @@ module.exports = {
     update,
     updateFavorite,
     deleteIngredients,
-    deleteById
+    deleteById,
+    listWorkspaceAssignments,
+    addWorkspaceAssignment,
+    removeWorkspaceAssignment,
+    countWorkspaceAssignments,
+    updateLegacyWorkspaceId
 };
