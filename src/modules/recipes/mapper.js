@@ -19,10 +19,7 @@ function normalizeRecipeRow(recipe) {
         mealTypes: parseMealTypes(recipe.mealTypes),
         ingredients: recipe.ingredients || "",
         instructions: recipe.instructions || "",
-        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0,
-        can_manage_workspace_assignments:
-            recipe.can_manage_workspace_assignments === true ||
-            Number(recipe.can_manage_workspace_assignments) === 1
+        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
     };
 }
 
