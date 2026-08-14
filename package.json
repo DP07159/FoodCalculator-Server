@@ -20,7 +20,12 @@
     "users:provision": "node scripts/provision-user.js",
     "users:list": "node scripts/list-users.js",
     "users:set-status": "node scripts/set-user-status.js",
-    "test:user-provisioning": "node tests/user-provisioning.test.js"
+    "test:user-provisioning": "node tests/user-provisioning.test.js",
+    "users:access": "node scripts/show-user-access.js",
+    "users:set-role": "node scripts/set-user-role.js",
+    "users:grant-capability": "node scripts/grant-user-capability.js",
+    "users:revoke-capability": "node scripts/revoke-user-capability.js",
+    "test:access-management": "node tests/access-management.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",
