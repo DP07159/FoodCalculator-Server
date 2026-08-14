@@ -1,15 +1,27 @@
 const { run, get, all } = require("../../database/database");
 
+function workspaceVisibilityWhere(alias = "r") {
+    return `
+        (
+            ${alias}.workspace_id = ?
+            OR EXISTS (
+                SELECT 1
+                FROM recipe_workspace_assignments rwa
+                WHERE rwa.recipe_id = ${alias}.id
+                  AND rwa.workspace_id = ?
+            )
+        )
+    `;
+}
+
 async function findAll(workspaceId) {
     return all(
-        `SELECT DISTINCT r.*
+        `SELECT r.*
          FROM recipes r
-         INNER JOIN recipe_workspace_assignments rwa
-            ON rwa.recipe_id = r.id
-         WHERE rwa.workspace_id = ?
+         WHERE ${workspaceVisibilityWhere("r")}
            AND r.visibility <> 'archived'
          ORDER BY r.name COLLATE NOCASE ASC`,
-        [workspaceId]
+        [workspaceId, workspaceId]
     );
 }
 
@@ -17,12 +29,10 @@ async function findById(recipeId, workspaceId) {
     return get(
         `SELECT r.*
          FROM recipes r
-         INNER JOIN recipe_workspace_assignments rwa
-            ON rwa.recipe_id = r.id
          WHERE r.id = ?
-           AND rwa.workspace_id = ?
+           AND ${workspaceVisibilityWhere("r")}
          LIMIT 1`,
-        [recipeId, workspaceId]
+        [recipeId, workspaceId, workspaceId]
     );
 }
 
