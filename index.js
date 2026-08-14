@@ -9,6 +9,7 @@ const foodItemService = require("./src/modules/foodItems/service");
 const inventoryService = require("./src/modules/inventory/service");
 const inventoryRoutes = require("./src/modules/inventory/routes");
 const mealPlanRoutes = require("./src/modules/mealPlans/routes");
+const recipeRoutes = require("./src/modules/recipes/routes");
 const recipeQueryRoutes = require("./src/modules/recipes/queryRoutes");
 const recipeWriteRoutes = require("./src/modules/recipes/writeRoutes");
 const recipeSyncService = require("./src/modules/recipes/syncService");
@@ -294,6 +295,7 @@ app.get("/check-db", async (req, res) => {
 
 app.use(inventoryRoutes);
 app.use(mealPlanRoutes);
+app.use("/recipes", recipeRoutes);
 app.use(recipeQueryRoutes);
 app.use(recipeWriteRoutes);
 app.use(adminRoutes);
