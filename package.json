@@ -30,7 +30,9 @@
     "workspaces:add-family-member": "node scripts/add-family-member.js",
     "recipes:assign-legacy": "node scripts/assign-legacy-recipes.js",
     "test:recipe-workspace": "node tests/recipe-workspace.test.js",
-    "test:recipe-multi-workspace": "node tests/recipe-multi-workspace.test.js"
+    "test:recipe-multi-workspace": "node tests/recipe-multi-workspace.test.js",
+    "platform-admin:bootstrap": "node scripts/bootstrap-platform-admin.js",
+    "test:platform-admin": "node tests/platform-admin.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",

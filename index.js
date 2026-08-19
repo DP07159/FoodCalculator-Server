@@ -17,6 +17,7 @@ const adminRoutes = require("./src/modules/admin/routes");
 const identity = require("./src/core/identity");
 const workspaces = require("./src/core/workspaces");
 const authorization = require("./src/core/authorization");
+const platformAdmin = require("./src/core/platformAdmin");
 
 
 const normalizeGermanText = ingredients.normalizeGermanText;
@@ -302,6 +303,7 @@ app.use(adminRoutes);
 app.use("/auth", identity.routes);
 app.use("/workspaces", workspaces.routes);
 app.use("/authorization", authorization.routes);
+app.use("/platform-admin", platformAdmin.routes);
 
 
 app.get("/food-items/resolve", async (req, res) => {
