@@ -32,7 +32,8 @@
     "test:recipe-workspace": "node tests/recipe-workspace.test.js",
     "test:recipe-multi-workspace": "node tests/recipe-multi-workspace.test.js",
     "platform-admin:bootstrap": "node scripts/bootstrap-platform-admin.js",
-    "test:platform-admin": "node tests/platform-admin.test.js"
+    "test:platform-admin": "node tests/platform-admin.test.js",
+    "test:route-scope": "node tests/route-scope.test.js"
   },
   "dependencies": {
     "express": "^4.18.2",

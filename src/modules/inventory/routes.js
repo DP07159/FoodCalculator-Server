@@ -6,11 +6,12 @@ const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessM
 
 const router = express.Router();
 
-router.use(requireAuthentication);
-router.use(requireWorkspaceContext);
-router.use(requireModuleEnabled("inventory"));
-
-router.get("/inventory/by-ingredient/:name", async (req, res) => {
+router.get(
+    "/inventory/by-ingredient/:name",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const ingredientName = String(req.params.name || "").trim();
         if (!ingredientName) {
@@ -29,7 +30,12 @@ router.get("/inventory/by-ingredient/:name", async (req, res) => {
     }
 });
 
-router.get("/inventory/suggestions", async (req, res) => {
+router.get(
+    "/inventory/suggestions",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const rows = await inventoryService.getInventorySuggestions(req.query.q || "");
         res.json(rows);
@@ -39,7 +45,12 @@ router.get("/inventory/suggestions", async (req, res) => {
     }
 });
 
-router.get("/inventory", async (req, res) => {
+router.get(
+    "/inventory",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const enriched = await inventoryService.getAllInventoryItemsWithBatches();
         res.json(enriched);
@@ -49,7 +60,12 @@ router.get("/inventory", async (req, res) => {
     }
 });
 
-router.get("/inventory/:id", async (req, res) => {
+router.get(
+    "/inventory/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const item = await inventoryService.getInventoryItem(req.params.id);
         if (!item) {
@@ -62,7 +78,12 @@ router.get("/inventory/:id", async (req, res) => {
     }
 });
 
-router.post("/inventory", async (req, res) => {
+router.post(
+    "/inventory",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const result = await inventoryService.createInventory(req.body || {});
         if (result.error) return res.status(400).json({ error: result.error });
@@ -73,7 +94,12 @@ router.post("/inventory", async (req, res) => {
     }
 });
 
-router.put("/inventory/:id", async (req, res) => {
+router.put(
+    "/inventory/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const result = await inventoryService.updateInventory(req.params.id, req.body || {});
         if (result.notFound) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
@@ -85,7 +111,12 @@ router.put("/inventory/:id", async (req, res) => {
     }
 });
 
-router.patch("/inventory/:id/adjust", async (req, res) => {
+router.patch(
+    "/inventory/:id/adjust",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const result = await inventoryService.adjustInventory(req.params.id, req.body || {});
         if (result.notFound) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
@@ -97,7 +128,12 @@ router.patch("/inventory/:id/adjust", async (req, res) => {
     }
 });
 
-router.delete("/inventory/:id/stock-profile", async (req, res) => {
+router.delete(
+    "/inventory/:id/stock-profile",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const result = await inventoryService.deleteStockProfile(req.params.id, req.body || {});
         if (result.notFound) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });
@@ -110,7 +146,12 @@ router.delete("/inventory/:id/stock-profile", async (req, res) => {
     }
 });
 
-router.delete("/inventory/:id", async (req, res) => {
+router.delete(
+    "/inventory/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("inventory"),
+    async (req, res) => {
     try {
         const deleted = await inventoryService.deleteInventoryItem(req.params.id);
         if (!deleted) return res.status(404).json({ error: "Inventar-Eintrag nicht gefunden" });

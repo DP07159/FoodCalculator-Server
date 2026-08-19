@@ -6,11 +6,12 @@ const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessM
 
 const router = express.Router();
 
-router.use(requireAuthentication);
-router.use(requireWorkspaceContext);
-router.use(requireModuleEnabled("meal_plan"));
-
-router.get("/meal_plans", async (req, res) => {
+router.get(
+    "/meal_plans",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("meal_plan"),
+    async (req, res) => {
     try {
         res.json(await mealPlanService.getAllMealPlans());
     } catch (error) {
@@ -19,7 +20,12 @@ router.get("/meal_plans", async (req, res) => {
     }
 });
 
-router.get("/meal_plans/:id", async (req, res) => {
+router.get(
+    "/meal_plans/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("meal_plan"),
+    async (req, res) => {
     try {
         const plan = await mealPlanService.getMealPlanById(req.params.id);
         if (!plan) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
@@ -30,7 +36,12 @@ router.get("/meal_plans/:id", async (req, res) => {
     }
 });
 
-router.post("/meal_plans", async (req, res) => {
+router.post(
+    "/meal_plans",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("meal_plan"),
+    async (req, res) => {
     try {
         const result = await mealPlanService.createMealPlan(req.body || {});
         if (result.error) return res.status(400).json({ error: result.error });
@@ -41,7 +52,12 @@ router.post("/meal_plans", async (req, res) => {
     }
 });
 
-router.put("/meal_plans/:id", async (req, res) => {
+router.put(
+    "/meal_plans/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("meal_plan"),
+    async (req, res) => {
     try {
         const result = await mealPlanService.updateMealPlan(req.params.id, req.body || {});
         if (result.error) return res.status(400).json({ error: result.error });
@@ -53,7 +69,12 @@ router.put("/meal_plans/:id", async (req, res) => {
     }
 });
 
-router.delete("/meal_plans/:id", async (req, res) => {
+router.delete(
+    "/meal_plans/:id",
+    requireAuthentication,
+    requireWorkspaceContext,
+    requireModuleEnabled("meal_plan"),
+    async (req, res) => {
     try {
         const deleted = await mealPlanService.deleteMealPlan(req.params.id);
         if (!deleted) return res.status(404).json({ error: "Wochenplan nicht gefunden" });
