@@ -2,6 +2,7 @@ const express = require("express");
 const recipeQueryService = require("./queryService");
 const { requireAuthentication } = require("../../core/identity/middleware");
 const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
+const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessMiddleware");
 
 const router = express.Router();
 
@@ -9,6 +10,7 @@ router.get(
     "/recipes/by-food-item/:foodItemId",
     requireAuthentication,
     requireWorkspaceContext,
+    requireModuleEnabled("recipes"),
     async (req, res) => {
         try {
             const result = await recipeQueryService.getRecipesByFoodItem(
@@ -28,6 +30,7 @@ router.get(
     "/recipes/by-ingredient/:name",
     requireAuthentication,
     requireWorkspaceContext,
+    requireModuleEnabled("recipes"),
     async (req, res) => {
         try {
             const result = await recipeQueryService.getRecipesByIngredient(
@@ -47,6 +50,7 @@ router.get(
     "/recipes/:id/stock-check",
     requireAuthentication,
     requireWorkspaceContext,
+    requireModuleEnabled("recipes"),
     async (req, res) => {
         try {
             const result = await recipeQueryService.getRecipeStockCheck(

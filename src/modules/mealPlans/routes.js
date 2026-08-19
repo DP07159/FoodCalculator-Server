@@ -1,7 +1,14 @@
 const express = require("express");
 const mealPlanService = require("./service");
+const { requireAuthentication } = require("../../core/identity/middleware");
+const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
+const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessMiddleware");
 
 const router = express.Router();
+
+router.use(requireAuthentication);
+router.use(requireWorkspaceContext);
+router.use(requireModuleEnabled("meal_plan"));
 
 router.get("/meal_plans", async (req, res) => {
     try {

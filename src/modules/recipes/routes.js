@@ -2,11 +2,13 @@ const express = require("express");
 const recipeController = require("./controller");
 const { requireAuthentication } = require("../../core/identity/middleware");
 const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
+const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessMiddleware");
 
 const router = express.Router();
 
 router.use(requireAuthentication);
 router.use(requireWorkspaceContext);
+router.use(requireModuleEnabled("recipes"));
 
 router.get("/", recipeController.getAllRecipes);
 router.get("/:id/workspace-assignments", recipeController.getWorkspaceAssignments);

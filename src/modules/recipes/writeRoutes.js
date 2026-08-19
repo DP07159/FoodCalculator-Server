@@ -2,6 +2,7 @@ const express = require("express");
 const recipeWriteService = require("./writeService");
 const { requireAuthentication } = require("../../core/identity/middleware");
 const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
+const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessMiddleware");
 
 const router = express.Router();
 
@@ -9,6 +10,7 @@ router.post(
     "/recipes",
     requireAuthentication,
     requireWorkspaceContext,
+    requireModuleEnabled("recipes"),
     async (req, res) => {
         try {
             const result = await recipeWriteService.createRecipe(
@@ -29,6 +31,7 @@ router.put(
     "/recipes/:id",
     requireAuthentication,
     requireWorkspaceContext,
+    requireModuleEnabled("recipes"),
     async (req, res) => {
         try {
             const result = await recipeWriteService.updateRecipe(
