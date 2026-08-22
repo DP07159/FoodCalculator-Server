@@ -1,5 +1,29 @@
 const MODULE_DEFINITIONS = Object.freeze([
     {
+        code: "wallet",
+        name: "Wallet",
+        description: "Food-Inspirationen aus Social Media, Websites und eigenen Notizen",
+        navigation: {
+            label: "Wallet",
+            short_label: "Wallet",
+            href: "/wallet.html",
+            icon: "wallet",
+            primary: true,
+            order: 50
+        },
+        home_actions: [
+            {
+                code: "save_inspiration",
+                label: "Inspiration merken",
+                description: "Link oder Idee in der Wallet speichern",
+                href: "/wallet.html?capture=1",
+                icon: "wallet",
+                order: 50,
+                intent_keywords: ["merken", "speichern", "inspiration", "instagram", "tiktok", "youtube", "pinterest", "wallet"]
+            }
+        ]
+    },
+    {
         code: "meal_plan",
         name: "Wochenplan",
         description: "Wochenplanung und gespeicherte Wochenpläne",
