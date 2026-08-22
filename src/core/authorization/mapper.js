@@ -2,7 +2,8 @@ function mapEffectiveAuthorization({
     membership,
     roles,
     capabilities,
-    privileges
+    privileges,
+    modules = []
 }) {
     return {
         membership: {
@@ -19,6 +20,13 @@ function mapEffectiveAuthorization({
             name: capability.name,
             module_code: capability.module_code,
             description: capability.description || ""
+        })),
+        modules: modules.map(moduleRow => ({
+            code: moduleRow.code,
+            name: moduleRow.name,
+            description: moduleRow.description || "",
+            enabled: moduleRow.enabled === true,
+            source: moduleRow.source || ""
         })),
         privileges: privileges.map(privilege => ({
             code: privilege.code,

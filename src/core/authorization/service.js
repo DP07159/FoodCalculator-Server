@@ -9,17 +9,19 @@ async function getEffectiveAuthorization(userId, workspacePublicId) {
 
     if (!membership) return null;
 
-    const [roles, capabilities, privileges] = await Promise.all([
+    const [roles, capabilities, privileges, modules] = await Promise.all([
         repository.listEffectiveRoles(membership.id),
         repository.listEffectiveCapabilities(membership.id),
-        repository.listEffectivePrivileges(membership.id)
+        repository.listEffectivePrivileges(membership.id),
+        repository.listEffectiveModules(membership.id)
     ]);
 
     return mapEffectiveAuthorization({
         membership,
         roles,
         capabilities,
-        privileges
+        privileges,
+        modules: modules.map(row => ({ ...row, enabled: Number(row.enabled) === 1 }))
     });
 }
 

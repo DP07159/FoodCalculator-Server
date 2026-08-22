@@ -140,6 +140,31 @@ async function listEffectivePrivileges(membershipId) {
     );
 }
 
+async function listEffectiveModules(membershipId) {
+    return all(
+        `SELECT
+            pm.code,
+            pm.name,
+            pm.description,
+            CASE
+                WHEN pm.status != 'active' THEN 0
+                WHEN mma.id IS NOT NULL THEN mma.enabled
+                ELSE pm.default_enabled
+            END AS enabled,
+            CASE
+                WHEN pm.status != 'active' THEN 'module_disabled_globally'
+                WHEN mma.id IS NOT NULL THEN 'membership_override'
+                ELSE 'module_default'
+            END AS source
+         FROM platform_modules pm
+         LEFT JOIN membership_module_access mma
+           ON mma.module_id = pm.id
+          AND mma.membership_id = ?
+         ORDER BY pm.code ASC`,
+        [membershipId]
+    );
+}
+
 async function listOwnerMemberships() {
     return all(
         `SELECT
@@ -328,6 +353,7 @@ module.exports = {
     listEffectiveRoles,
     listEffectiveCapabilities,
     listEffectivePrivileges,
+    listEffectiveModules,
     listOwnerMemberships,
     findManagedMembershipByUserEmail,
     listAuthorizationCatalog,
