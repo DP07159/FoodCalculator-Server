@@ -19,6 +19,7 @@ const workspaces = require("./src/core/workspaces");
 const authorization = require("./src/core/authorization");
 const platformAdmin = require("./src/core/platformAdmin");
 const moduleRegistry = require("./src/core/moduleRegistry");
+const wallet = require("./src/modules/wallet");
 
 
 const normalizeGermanText = ingredients.normalizeGermanText;
@@ -306,6 +307,7 @@ app.use("/workspaces", workspaces.routes);
 app.use("/authorization", authorization.routes);
 app.use("/platform-admin", platformAdmin.routes);
 app.use("/platform", moduleRegistry.routes);
+app.use("/wallet", wallet.routes);
 
 
 app.get("/food-items/resolve", async (req, res) => {
