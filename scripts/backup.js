@@ -11,7 +11,7 @@ async function main() {
     const sourcePath = resolveDatabasePath();
     if (!fs.existsSync(sourcePath)) throw new Error(`Datenbank nicht gefunden: ${sourcePath}`);
 
-    const backupDir = path.resolve(process.env.BACKUP_DIR || path.join(__dirname, "..", "backups"));
+    const backupDir = path.resolve(process.env.BACKUP_DIR || "/var/data/backups");
     fs.mkdirSync(backupDir, { recursive: true });
     const targetPath = path.join(backupDir, `food_calculator_${timestamp()}.sqlite`);
 
