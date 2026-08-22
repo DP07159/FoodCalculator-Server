@@ -4,41 +4,11 @@
   "description": "Backend für den Food Calculator",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "smoke": "node tests/smoke-test.js",
-    "migrate": "node scripts/migrate.js",
-    "backup": "node scripts/backup.js",
-    "restore:test": "node scripts/restore-test.js",
-    "test:ingredients": "node tests/ingredientModule.test.js",
-    "identity:bootstrap": "node scripts/bootstrap-identity.js",
-    "test:identity": "node tests/identity-core.test.js",
-    "identity:reset-password": "node scripts/reset-identity-password.js",
-    "workspace:bootstrap": "node scripts/bootstrap-workspaces.js",
-    "test:workspace": "node tests/workspace-core.test.js",
-    "authorization:bootstrap": "node scripts/bootstrap-authorization.js",
-    "test:authorization": "node tests/authorization-core.test.js",
-    "users:provision": "node scripts/provision-user.js",
-    "users:list": "node scripts/list-users.js",
-    "users:set-status": "node scripts/set-user-status.js",
-    "test:user-provisioning": "node tests/user-provisioning.test.js",
-    "users:access": "node scripts/show-user-access.js",
-    "users:set-role": "node scripts/set-user-role.js",
-    "users:grant-capability": "node scripts/grant-user-capability.js",
-    "users:revoke-capability": "node scripts/revoke-user-capability.js",
-    "test:access-management": "node tests/access-management.test.js",
-    "workspaces:create-family": "node scripts/create-family-workspace.js",
-    "workspaces:add-family-member": "node scripts/add-family-member.js",
-    "recipes:assign-legacy": "node scripts/assign-legacy-recipes.js",
-    "test:recipe-workspace": "node tests/recipe-workspace.test.js",
-    "test:recipe-multi-workspace": "node tests/recipe-multi-workspace.test.js",
-    "platform-admin:bootstrap": "node scripts/bootstrap-platform-admin.js",
-    "test:platform-admin": "node tests/platform-admin.test.js",
-    "test:route-scope": "node tests/route-scope.test.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "sqlite3": "^5.1.4",
-    "cors": "^2.8.5",
-    "argon2": "^0.41.1"
+    "cors": "^2.8.5"
   }
 }
