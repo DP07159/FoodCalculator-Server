@@ -9,6 +9,7 @@ router.use(requireAuthentication);
 router.use(requireWorkspaceContext);
 router.use(requireModuleEnabled("wallet"));
 router.get("/", controller.list);
+router.post("/preview", controller.preview);
 router.post("/", controller.create);
 router.patch("/:publicId", controller.update);
 router.delete("/:publicId", controller.remove);

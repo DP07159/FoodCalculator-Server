@@ -7,6 +7,14 @@ async function list(req, res, next) {
     } catch (error) { next(error); }
 }
 
+async function preview(req, res, next) {
+    try {
+        const result = await service.previewSource(req.body || {});
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.json(result.value);
+    } catch (error) { next(error); }
+}
+
 async function create(req, res, next) {
     try {
         const result = await service.createItem({
@@ -40,4 +48,4 @@ async function remove(req, res, next) {
     } catch (error) { next(error); }
 }
 
-module.exports = { list, create, update, remove };
+module.exports = { list, preview, create, update, remove };
