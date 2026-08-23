@@ -11,6 +11,8 @@ router.use(requireModuleEnabled("wallet"));
 router.get("/", controller.list);
 router.post("/preview", controller.preview);
 router.post("/", controller.create);
+router.get("/:publicId/workspace-assignments", controller.getWorkspaceAssignments);
+router.put("/:publicId/workspace-assignments", controller.updateWorkspaceAssignments);
 router.patch("/:publicId", controller.update);
 router.delete("/:publicId", controller.remove);
 
