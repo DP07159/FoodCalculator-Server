@@ -7,6 +7,9 @@ assert.ok(getModuleDefinitions().some(moduleDefinition => moduleDefinition.code 
 assert.strictEqual(validator.validateCreate({ source_url: "https://instagram.com/p/example" }).value.source_type, "link");
 assert.ok(validator.validateCreate({ source_url: "notaurl" }).error);
 assert.strictEqual(validator.validateCreate({ note: "Merken" }).value.source_type, "note");
+assert.strictEqual(validator.validateCreate({ note: "Merken", category: "restaurant" }).value.category, "restaurant");
+assert.ok(validator.validateCreate({ note: "Merken", category: "unknown-category" }).error);
+assert.strictEqual(validator.validateUpdate({ category: "recipe" }).value.category, "recipe");
 assert.strictEqual(validator.validateCreate({ source_url: "https://example.com", source_image_url: "https://example.com/a.jpg" }).value.source_image_url, "https://example.com/a.jpg");
 assert.ok(validator.validatePreview({ source_url: "https://example.com" }).value);
 assert.ok(validator.validatePreview({ source_url: "file:///tmp/test" }).error);
