@@ -61,4 +61,9 @@ async function updateWorkspaceAssignments(req, res, next) {
     } catch (error) { next(error); }
 }
 
-module.exports = { list, preview, create, update, remove, getWorkspaceAssignments, updateWorkspaceAssignments };
+async function getRecipeLinks(req,res,next){try{const result=await service.getRecipeLinkOptions({workspaceId:req.workspaceId,userId:req.auth.user.id,publicId:req.params.publicId});if(result.notFound)return res.status(404).json({error:"Wallet-Eintrag nicht gefunden."});res.json(result.value);}catch(error){next(error);}}
+async function updateRecipeLinks(req,res,next){try{const result=await service.setRecipeLinks({workspaceId:req.workspaceId,userId:req.auth.user.id,publicId:req.params.publicId,recipeIds:req.body.recipe_ids});if(result.notFound)return res.status(404).json({error:"Wallet-Eintrag nicht gefunden."});if(result.error)return res.status(400).json({error:result.error});res.json(result.value);}catch(error){next(error);}}
+async function addRecipeLink(req,res,next){try{const result=await service.addRecipeLink({workspaceId:req.workspaceId,userId:req.auth.user.id,publicId:req.params.publicId,recipeId:req.body.recipe_id});if(result.notFound)return res.status(404).json({error:"Wallet-Eintrag nicht gefunden."});if(result.error)return res.status(400).json({error:result.error});res.status(201).json(result.value);}catch(error){next(error);}}
+async function getItemsForRecipe(req,res,next){try{const result=await service.getItemsForRecipe({workspaceId:req.workspaceId,userId:req.auth.user.id,recipeId:req.params.recipeId});if(result.notFound)return res.status(404).json({error:"Rezept nicht gefunden."});res.json(result.value);}catch(error){next(error);}}
+
+module.exports = { list, preview, create, update, remove, getWorkspaceAssignments, updateWorkspaceAssignments, getRecipeLinks, updateRecipeLinks, addRecipeLink, getItemsForRecipe };

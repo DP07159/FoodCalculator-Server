@@ -1,10 +1,13 @@
 function cleanText(value, maxLength = 500) { const text=String(value??"").trim(); return text ? text.slice(0,maxLength) : ""; }
 function normalizeUrl(value) { const raw=cleanText(value,2048); if(!raw)return ""; try{const parsed=new URL(raw); if(!["http:","https:"].includes(parsed.protocol))return ""; return parsed.toString();}catch(_){return "";} }
+const allowedCategories=new Set(["recipe","restaurant","product","technique","presentation","shop","other"]);
+function normalizeCategory(value){const category=cleanText(value,32);return allowedCategories.has(category)?category:null;}
 function validateCreate(payload={}) {
-    const sourceUrl=normalizeUrl(payload.source_url); const title=cleanText(payload.title,240); const note=cleanText(payload.note,2000); const imageUrl=normalizeUrl(payload.source_image_url); const pageTitle=cleanText(payload.source_page_title,240); const sourceType=sourceUrl?"link":"note";
+    const sourceUrl=normalizeUrl(payload.source_url); const title=cleanText(payload.title,240); const note=cleanText(payload.note,2000); const imageUrl=normalizeUrl(payload.source_image_url); const pageTitle=cleanText(payload.source_page_title,240); const sourceType=sourceUrl?"link":"note"; const category=normalizeCategory(payload.category);
     if(!sourceUrl&&!title&&!note)return {error:"Speichere mindestens einen Link, Titel oder eine Notiz."};
     if(payload.source_url&&!sourceUrl)return {error:"Die Quelle muss eine gültige http- oder https-Adresse sein."};
-    return {value:{source_type:sourceType,source_url:sourceUrl||null,title:title||null,note:note||null,source_image_url:imageUrl||null,source_page_title:pageTitle||null}};
+    if(payload.category&&!category)return {error:"Unbekannte Inspirationskategorie."};
+    return {value:{source_type:sourceType,source_url:sourceUrl||null,title:title||null,note:note||null,source_image_url:imageUrl||null,source_page_title:pageTitle||null,category}};
 }
 function validateUpdate(payload={}) {
     const allowedStatus=new Set(["saved","used","archived"]); const value={};
@@ -13,6 +16,7 @@ function validateUpdate(payload={}) {
     if(Object.prototype.hasOwnProperty.call(payload,"source_url")){const u=normalizeUrl(payload.source_url); if(payload.source_url&&!u)return {error:"Die Quelle muss eine gültige http- oder https-Adresse sein."}; value.source_url=u||null;}
     if(Object.prototype.hasOwnProperty.call(payload,"source_image_url")){const u=normalizeUrl(payload.source_image_url); if(payload.source_image_url&&!u)return {error:"Die Bildquelle muss eine gültige http- oder https-Adresse sein."}; value.source_image_url=u||null;}
     if(Object.prototype.hasOwnProperty.call(payload,"status")){const s=cleanText(payload.status,32); if(!allowedStatus.has(s))return {error:"Unbekannter Wallet-Status."}; value.status=s;}
+    if(Object.prototype.hasOwnProperty.call(payload,"category")){const c=normalizeCategory(payload.category); if(payload.category&&!c)return {error:"Unbekannte Inspirationskategorie."}; value.category=c;}
     if(!Object.keys(value).length)return {error:"Keine gültige Änderung angegeben."}; return {value};
 }
 function validatePreview(payload={}) { const sourceUrl=normalizeUrl(payload.source_url); if(!sourceUrl)return {error:"Gib einen gültigen Link ein."}; return {value:{source_url:sourceUrl}}; }

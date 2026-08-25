@@ -4,7 +4,8 @@ const visibleSelect = `
     SELECT
         wi.*,
         u.display_name AS created_by_name,
-        (SELECT COUNT(*) FROM wallet_workspace_assignments wwa_count WHERE wwa_count.wallet_item_id = wi.id) AS workspace_assignment_count
+        (SELECT COUNT(*) FROM wallet_workspace_assignments wwa_count WHERE wwa_count.wallet_item_id = wi.id) AS workspace_assignment_count,
+        (SELECT COUNT(*) FROM wallet_recipe_links wrl_count WHERE wrl_count.wallet_item_id = wi.id) AS recipe_link_count
     FROM wallet_items wi
     LEFT JOIN users u ON u.id = wi.created_by_user_id`;
 
@@ -48,11 +49,11 @@ async function insertItem(item) {
     const result = await run(`INSERT INTO wallet_items (
         public_id, workspace_id, created_by_user_id, source_type, source_url,
         source_platform, source_external_id, source_image_url, source_page_title,
-        title, note, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved')`, [
+        title, note, category, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'saved')`, [
         item.public_id,item.workspace_id,item.created_by_user_id,item.source_type,
         item.source_url,item.source_platform,item.source_external_id,item.source_image_url,
-        item.source_page_title,item.title,item.note
+        item.source_page_title,item.title,item.note,item.category
     ]);
     return result.lastID;
 }
@@ -60,7 +61,7 @@ async function insertItem(item) {
 async function updateItemByOwner(publicId, userId, fields) {
     const sets=[]; const params=[];
     for (const [key,value] of Object.entries(fields)) {
-        if (!["title","note","status","source_url","source_platform","source_image_url","source_page_title"].includes(key)) continue;
+        if (!["title","note","status","source_url","source_platform","source_image_url","source_page_title","category"].includes(key)) continue;
         sets.push(`${key} = ?`); params.push(value);
     }
     if (!sets.length) return 0;
@@ -107,6 +108,35 @@ async function updateLegacyWorkspaceId(walletItemId, workspaceId) {
     return run(`UPDATE wallet_items SET workspace_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [workspaceId, walletItemId]);
 }
 
+async function listRecipeLinksForItem(walletItemId, workspaceId) {
+    return all(`SELECT wrl.recipe_id, wrl.linked_by_user_id, wrl.created_at
+        FROM wallet_recipe_links wrl
+        INNER JOIN recipe_workspace_assignments rwa ON rwa.recipe_id = wrl.recipe_id
+        WHERE wrl.wallet_item_id = ? AND rwa.workspace_id = ?
+        ORDER BY wrl.created_at ASC`, [walletItemId, workspaceId]);
+}
+
+async function addRecipeLink({walletItemId, recipeId, linkedByUserId}) {
+    return run(`INSERT INTO wallet_recipe_links (wallet_item_id, recipe_id, linked_by_user_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(wallet_item_id, recipe_id) DO NOTHING`, [walletItemId, recipeId, linkedByUserId]);
+}
+
+async function removeRecipeLink(walletItemId, recipeId) {
+    return run(`DELETE FROM wallet_recipe_links WHERE wallet_item_id = ? AND recipe_id = ?`, [walletItemId, recipeId]);
+}
+
+async function listItemsForRecipe(recipeId, workspaceId) {
+    return all(`${visibleSelect}
+        INNER JOIN wallet_recipe_links wrl ON wrl.wallet_item_id = wi.id
+        WHERE wrl.recipe_id = ?
+          AND EXISTS (
+            SELECT 1 FROM wallet_workspace_assignments wwa
+            WHERE wwa.wallet_item_id = wi.id AND wwa.workspace_id = ?
+          )
+        ORDER BY wi.saved_at DESC, wi.id DESC`, [recipeId, workspaceId]);
+}
+
 module.exports = {
     listItems,
     findByPublicId,
@@ -117,5 +147,9 @@ module.exports = {
     listWorkspaceAssignments,
     addWorkspaceAssignment,
     removeWorkspaceAssignment,
-    updateLegacyWorkspaceId
+    updateLegacyWorkspaceId,
+    listRecipeLinksForItem,
+    addRecipeLink,
+    removeRecipeLink,
+    listItemsForRecipe
 };
