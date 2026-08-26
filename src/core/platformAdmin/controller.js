@@ -1,5 +1,59 @@
 const service = require("./service");
 
+
+async function createUser(req, res) {
+    try {
+        const result = await service.createManagedUser(req.body, req.auth.user);
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.status(201).json(result.value);
+    } catch (error) {
+        console.error("Fehler bei POST /platform-admin/users:", error.message);
+        res.status(500).json({ error: "Benutzer konnte nicht angelegt werden." });
+    }
+}
+
+async function listWorkspaces(req, res) {
+    try {
+        res.json({ workspaces: await service.listWorkspaces() });
+    } catch (error) {
+        console.error("Fehler bei GET /platform-admin/workspaces:", error.message);
+        res.status(500).json({ error: "Workspaces konnten nicht geladen werden." });
+    }
+}
+
+async function addMembership(req, res) {
+    try {
+        const result = await service.addUserMembership({
+            publicId: req.params.publicId,
+            workspacePublicId: req.body?.workspace_public_id,
+            roleCode: req.body?.role_code,
+            actorUser: req.auth.user
+        });
+        if (result.notFound) return res.status(404).json({ error: "Benutzer wurde nicht gefunden." });
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.status(201).json(result.value);
+    } catch (error) {
+        console.error("Fehler beim Zuweisen eines Workspace:", error.message);
+        res.status(500).json({ error: "Workspace konnte nicht zugewiesen werden." });
+    }
+}
+
+async function removeMembership(req, res) {
+    try {
+        const result = await service.removeUserMembership({
+            publicId: req.params.publicId,
+            membershipId: Number(req.params.membershipId)
+        });
+        if (result.notFound) return res.status(404).json({ error: "Membership wurde nicht gefunden." });
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.json(result.value);
+    } catch (error) {
+        console.error("Fehler beim Entfernen eines Workspace:", error.message);
+        res.status(500).json({ error: "Workspace-Zuweisung konnte nicht entfernt werden." });
+    }
+}
+
+
 async function listUsers(req, res) {
     try {
         res.json({
@@ -147,5 +201,9 @@ module.exports = {
     getCatalog,
     setRole,
     setCapability,
-    setModule
+    setModule,
+    createUser,
+    listWorkspaces,
+    addMembership,
+    removeMembership
 };
