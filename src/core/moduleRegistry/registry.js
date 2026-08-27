@@ -14,9 +14,9 @@ const MODULE_DEFINITIONS = Object.freeze([
         home_actions: [
             {
                 code: "save_inspiration",
-                label: "Inspiration merken",
-                description: "Link oder Idee in der Wallet speichern",
-                href: "/wallet.html?capture=1",
+                label: "Inspiration",
+                description: "Stöbere durch Ideen für deinen Moment",
+                href: "/wallet.html",
                 icon: "wallet",
                 order: 50,
                 intent_keywords: ["merken", "speichern", "inspiration", "instagram", "tiktok", "youtube", "pinterest", "wallet"]
@@ -38,8 +38,8 @@ const MODULE_DEFINITIONS = Object.freeze([
         home_actions: [
             {
                 code: "plan_week",
-                label: "Woche planen",
-                description: "Mahlzeiten intuitiv platzieren",
+                label: "Planen",
+                description: "Für später, heute Abend oder die nächsten Tage",
                 href: "/mealPlan.html",
                 icon: "calendar",
                 order: 20,
@@ -70,8 +70,8 @@ const MODULE_DEFINITIONS = Object.freeze([
         home_actions: [
             {
                 code: "cook_now",
-                label: "Jetzt kochen",
-                description: "Ein passendes Rezept finden",
+                label: "Jetzt etwas",
+                description: "Finde etwas Passendes für jetzt",
                 href: "/recipes.html",
                 icon: "recipes",
                 order: 10,
@@ -104,8 +104,8 @@ const MODULE_DEFINITIONS = Object.freeze([
         home_actions: [
             {
                 code: "maintain_inventory",
-                label: "Inventar pflegen",
-                description: "Sehen, was da ist",
+                label: "Was da ist",
+                description: "Mach etwas aus dem, was du schon hast",
                 href: "/inventory.html",
                 icon: "inventory",
                 order: 30,
