@@ -20,6 +20,7 @@ const authorization = require("./src/core/authorization");
 const platformAdmin = require("./src/core/platformAdmin");
 const moduleRegistry = require("./src/core/moduleRegistry");
 const wallet = require("./src/modules/wallet");
+const foodMomentRoutes = require("./src/modules/foodMoments/routes");
 
 
 const normalizeGermanText = ingredients.normalizeGermanText;
@@ -308,6 +309,7 @@ app.use("/authorization", authorization.routes);
 app.use("/platform-admin", platformAdmin.routes);
 app.use("/platform", moduleRegistry.routes);
 app.use("/wallet", wallet.routes);
+app.use("/food-moments", foodMomentRoutes);
 
 
 app.get("/food-items/resolve", async (req, res) => {
