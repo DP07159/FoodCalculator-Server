@@ -1,5 +1,17 @@
 const MODULE_DEFINITIONS = Object.freeze([
     {
+        code: "food_moments",
+        name: "Food Moments",
+        description: "Momente als verbindende Ebene zwischen Inspiration, Rezept und Planung",
+        navigation: {
+            label: "Food Moments", short_label: "Moments", href: "/foodMoments.html", icon: "moment", primary: true, order: 10
+        },
+        secondary_navigation: [
+            { label: "Food Moment erstellen", href: "/foodMomentCreate.html", icon: "plus", order: 5 }
+        ],
+        home_actions: []
+    },
+    {
         code: "wallet",
         name: "Wallet",
         description: "Food-Inspirationen aus Social Media, Websites und eigenen Notizen",
