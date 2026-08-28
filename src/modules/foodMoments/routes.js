@@ -11,127 +11,35 @@ router.use(requireAuthentication);
 router.use(requireWorkspaceContext);
 router.use(requireModuleEnabled("food_moments"));
 
-function clean(value) { return String(value ?? "").trim(); }
-function publicId() { return `fm_${crypto.randomBytes(12).toString("hex")}`; }
-function intOrNull(value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? n : null; }
-
-async function hydrate(row) {
-    if (!row) return null;
-    const [recipes, inspirations, workspace] = await Promise.all([
-        all(`SELECT r.id, r.name, r.calories, r.portions
-             FROM food_moment_recipe_links l
-             JOIN recipes r ON r.id = l.recipe_id
-             WHERE l.food_moment_id = ?
-               AND (r.workspace_id = ? OR EXISTS (
-                    SELECT 1 FROM recipe_workspace_assignments a
-                    WHERE a.recipe_id = r.id AND a.workspace_id = ?
-               ))
-             ORDER BY l.id`, [row.id, row.workspace_id, row.workspace_id]),
-        all(`SELECT w.public_id, w.title, w.category, w.source_url, w.source_image_url
-             FROM food_moment_wallet_links l
-             JOIN wallet_items w ON w.id = l.wallet_item_id
-             JOIN wallet_workspace_assignments a ON a.wallet_item_id = w.id AND a.workspace_id = ?
-             WHERE l.food_moment_id = ? ORDER BY l.id`, [row.workspace_id, row.id]),
-        get(`SELECT public_id, name FROM workspaces WHERE id = ?`, [row.workspace_id])
+function clean(value){return String(value??"").trim();}
+function publicId(){return `fm_${crypto.randomBytes(12).toString("hex")}`;}
+function intOrNull(value){const n=Number(value);return Number.isInteger(n)&&n>0?n:null;}
+function uniqueInts(value){return [...new Set((Array.isArray(value)?value:[]).map(intOrNull).filter(Boolean))];}
+function uniqueStrings(value){return [...new Set((Array.isArray(value)?value:[]).map(clean).filter(Boolean))];}
+async function visibleMoment(publicIdValue, workspaceId){return get(`SELECT fm.* FROM food_moments fm WHERE fm.public_id=? AND (fm.workspace_id=? OR EXISTS(SELECT 1 FROM food_moment_workspace_assignments a WHERE a.food_moment_id=fm.id AND a.workspace_id=?))`,[publicIdValue,workspaceId,workspaceId]);}
+async function hydrate(row, workspaceId){
+    if(!row)return null;
+    const [recipes,inspirations,workspace,assignments]=await Promise.all([
+        all(`SELECT r.id,r.name,r.calories,r.portions FROM food_moment_recipe_links l JOIN recipes r ON r.id=l.recipe_id WHERE l.food_moment_id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) ORDER BY l.id`,[row.id,workspaceId,workspaceId]),
+        all(`SELECT w.public_id,w.title,w.category,w.source_url,w.source_image_url FROM food_moment_wallet_links l JOIN wallet_items w ON w.id=l.wallet_item_id JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id AND a.workspace_id=? WHERE l.food_moment_id=? ORDER BY l.id`,[workspaceId,row.id]),
+        get(`SELECT public_id,name FROM workspaces WHERE id=?`,[row.workspace_id]),
+        all(`SELECT ws.public_id,ws.name FROM food_moment_workspace_assignments a JOIN workspaces ws ON ws.id=a.workspace_id WHERE a.food_moment_id=? ORDER BY ws.name`,[row.id])
     ]);
-    return { ...row, recipes, inspirations, workspace };
+    return {...row,recipes,inspirations,workspace,workspace_assignments:assignments};
 }
-
-router.get("/", async (req, res, next) => {
-    try {
-        const rows = await all(`SELECT * FROM food_moments WHERE workspace_id = ? ORDER BY COALESCE(moment_date, '9999-12-31'), created_at DESC`, [req.workspaceId]);
-        res.json(await Promise.all(rows.map(hydrate)));
-    } catch (error) { next(error); }
-});
-
-router.get("/:publicId", async (req, res, next) => {
-    try {
-        const row = await get(`SELECT * FROM food_moments WHERE public_id = ? AND workspace_id = ?`, [req.params.publicId, req.workspaceId]);
-        if (!row) return res.status(404).json({ error: "Food Moment nicht gefunden." });
-        res.json(await hydrate(row));
-    } catch (error) { next(error); }
-});
-
-router.post("/", async (req, res, next) => {
-    try {
-        const body = req.body || {};
-        const title = clean(body.title);
-        if (!title) return res.status(400).json({ error: "Bitte gib deinem Food Moment einen Namen." });
-        const id = publicId();
-        const result = await run(`INSERT INTO food_moments
-            (public_id, workspace_id, owner_user_id, title, timing_code, moment_date, moment_time, audience_code, people_count, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-            id, req.workspaceId, req.auth.user.id, title, clean(body.timing_code) || "open",
-            clean(body.moment_date) || null, clean(body.moment_time) || null,
-            clean(body.audience_code) || "open", intOrNull(body.people_count), clean(body.notes)
-        ]);
-        const recipeId = intOrNull(body.recipe_id);
-        if (recipeId) {
-            const recipe = await get(`SELECT r.id FROM recipes r WHERE r.id = ? AND (r.workspace_id = ? OR EXISTS (SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id = r.id AND a.workspace_id = ?)) LIMIT 1`, [recipeId, req.workspaceId, req.workspaceId]);
-            if (recipe) await run(`INSERT OR IGNORE INTO food_moment_recipe_links (food_moment_id, recipe_id) VALUES (?, ?)`, [result.lastID, recipe.id]);
-        }
-        const walletPublicId = clean(body.wallet_public_id);
-        if (walletPublicId) {
-            const wallet = await get(`SELECT w.id FROM wallet_items w
-                JOIN wallet_workspace_assignments a ON a.wallet_item_id = w.id
-                WHERE w.public_id = ? AND a.workspace_id = ? LIMIT 1`, [walletPublicId, req.workspaceId]);
-            if (wallet) {
-                await run(`INSERT OR IGNORE INTO food_moment_wallet_links (food_moment_id, wallet_item_id) VALUES (?, ?)`, [result.lastID, wallet.id]);
-                await run(`INSERT OR IGNORE INTO wallet_item_relations (wallet_item_id, target_type, target_reference, created_by_user_id) VALUES (?, 'food_moment', ?, ?)`, [wallet.id, id, req.auth.user.id]);
-            }
-        }
-        const row = await get(`SELECT * FROM food_moments WHERE id = ?`, [result.lastID]);
-        res.status(201).json(await hydrate(row));
-    } catch (error) { next(error); }
-});
-
-router.patch("/:publicId", async (req, res, next) => {
-    try {
-        const existing = await get(`SELECT * FROM food_moments WHERE public_id = ? AND workspace_id = ?`, [req.params.publicId, req.workspaceId]);
-        if (!existing) return res.status(404).json({ error: "Food Moment nicht gefunden." });
-        const body = req.body || {};
-        let targetWorkspaceId = existing.workspace_id;
-        const targetWorkspacePublicId = clean(body.workspace_public_id);
-        if (targetWorkspacePublicId) {
-            const eligible = await workspaceRepository.listActiveWorkspacesForUser(req.auth.user.id);
-            const target = eligible.find(item => item.public_id === targetWorkspacePublicId);
-            if (!target) return res.status(403).json({ error: "Dieser Workspace steht dir nicht zur Verfügung." });
-            targetWorkspaceId = Number(target.id);
-        }
-        await run(`UPDATE food_moments SET workspace_id=?, title=?, timing_code=?, moment_date=?, moment_time=?, audience_code=?, people_count=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, [
-            targetWorkspaceId,
-            clean(body.title ?? existing.title) || existing.title,
-            clean(body.timing_code ?? existing.timing_code) || "open",
-            clean(body.moment_date ?? existing.moment_date) || null,
-            clean(body.moment_time ?? existing.moment_time) || null,
-            clean(body.audience_code ?? existing.audience_code) || "open",
-            intOrNull(body.people_count ?? existing.people_count), clean(body.notes ?? existing.notes), existing.id
-        ]);
-        if (targetWorkspaceId !== existing.workspace_id) {
-            await run(`DELETE FROM food_moment_recipe_links
-                       WHERE food_moment_id = ? AND recipe_id NOT IN (
-                           SELECT r.id FROM recipes r
-                           WHERE r.workspace_id = ? OR EXISTS (
-                               SELECT 1 FROM recipe_workspace_assignments a
-                               WHERE a.recipe_id = r.id AND a.workspace_id = ?
-                           )
-                       )`, [existing.id, targetWorkspaceId, targetWorkspaceId]);
-            await run(`DELETE FROM food_moment_wallet_links
-                       WHERE food_moment_id = ? AND wallet_item_id NOT IN (
-                           SELECT wallet_item_id FROM wallet_workspace_assignments WHERE workspace_id = ?
-                       )`, [existing.id, targetWorkspaceId]);
-        }
-        res.json(await hydrate(await get(`SELECT * FROM food_moments WHERE id = ?`, [existing.id])));
-    } catch (error) { next(error); }
-});
-
-router.delete("/:publicId", async (req, res, next) => {
-    try {
-        const existing = await get(`SELECT id FROM food_moments WHERE public_id = ? AND workspace_id = ?`, [req.params.publicId, req.workspaceId]);
-        if (!existing) return res.status(404).json({ error: "Food Moment nicht gefunden." });
-        await run(`DELETE FROM food_moments WHERE id = ?`, [existing.id]);
-        res.json({ success: true });
-    } catch (error) { next(error); }
-});
-
-module.exports = router;
+async function syncLinks(momentId, body, workspaceId, publicMomentId, userId){
+    const recipeIds=uniqueInts(body.recipe_ids ?? (body.recipe_id?[body.recipe_id]:[]));
+    const walletIds=uniqueStrings(body.wallet_public_ids ?? (body.wallet_public_id?[body.wallet_public_id]:[]));
+    await run(`DELETE FROM food_moment_recipe_links WHERE food_moment_id=?`,[momentId]);
+    for(const rid of recipeIds){const r=await get(`SELECT r.id FROM recipes r WHERE r.id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) LIMIT 1`,[rid,workspaceId,workspaceId]);if(r)await run(`INSERT OR IGNORE INTO food_moment_recipe_links(food_moment_id,recipe_id) VALUES(?,?)`,[momentId,r.id]);}
+    await run(`DELETE FROM food_moment_wallet_links WHERE food_moment_id=?`,[momentId]);
+    for(const wid of walletIds){const w=await get(`SELECT w.id FROM wallet_items w JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id WHERE w.public_id=? AND a.workspace_id=? LIMIT 1`,[wid,workspaceId]);if(w){await run(`INSERT OR IGNORE INTO food_moment_wallet_links(food_moment_id,wallet_item_id) VALUES(?,?)`,[momentId,w.id]);await run(`INSERT OR IGNORE INTO wallet_item_relations(wallet_item_id,target_type,target_reference,created_by_user_id) VALUES(?,'food_moment',?,?)`,[w.id,publicMomentId,userId]);}}
+}
+router.get("/",async(req,res,next)=>{try{const rows=await all(`SELECT DISTINCT fm.* FROM food_moments fm LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE fm.workspace_id=? OR a.workspace_id=? ORDER BY COALESCE(fm.moment_date,'9999-12-31'),fm.created_at DESC`,[req.workspaceId,req.workspaceId]);res.json(await Promise.all(rows.map(r=>hydrate(r,req.workspaceId))));}catch(e){next(e);}});
+router.get("/:publicId",async(req,res,next)=>{try{const row=await visibleMoment(req.params.publicId,req.workspaceId);if(!row)return res.status(404).json({error:"Food Moment nicht gefunden."});res.json(await hydrate(row,req.workspaceId));}catch(e){next(e);}});
+router.post("/",async(req,res,next)=>{try{const body=req.body||{};const title=clean(body.title);if(!title)return res.status(400).json({error:"Bitte gib deinem Food Moment einen Namen."});const id=publicId();const result=await run(`INSERT INTO food_moments(public_id,workspace_id,owner_user_id,title,timing_code,moment_date,moment_time,audience_code,people_count,notes) VALUES(?,?,?,?,?,?,?,?,?,?)`,[id,req.workspaceId,req.auth.user.id,title,clean(body.timing_code)||"open",clean(body.moment_date)||null,clean(body.moment_time)||null,clean(body.audience_code)||"open",intOrNull(body.people_count),clean(body.notes)]);await run(`INSERT OR IGNORE INTO food_moment_workspace_assignments(food_moment_id,workspace_id,assigned_by_user_id) VALUES(?,?,?)`,[result.lastID,req.workspaceId,req.auth.user.id]);await syncLinks(result.lastID,body,req.workspaceId,id,req.auth.user.id);res.status(201).json(await hydrate(await get(`SELECT * FROM food_moments WHERE id=?`,[result.lastID]),req.workspaceId));}catch(e){next(e);}});
+router.patch("/:publicId",async(req,res,next)=>{try{const existing=await visibleMoment(req.params.publicId,req.workspaceId);if(!existing)return res.status(404).json({error:"Food Moment nicht gefunden."});if(Number(existing.owner_user_id)!==Number(req.auth.user.id))return res.status(403).json({error:"Nur der Eigentümer kann diesen Food Moment bearbeiten."});const body=req.body||{};await run(`UPDATE food_moments SET title=?,timing_code=?,moment_date=?,moment_time=?,audience_code=?,people_count=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,[clean(body.title??existing.title)||existing.title,clean(body.timing_code??existing.timing_code)||"open",clean(body.moment_date??existing.moment_date)||null,clean(body.moment_time??existing.moment_time)||null,clean(body.audience_code??existing.audience_code)||"open",intOrNull(body.people_count??existing.people_count),clean(body.notes??existing.notes),existing.id]);if('recipe_ids' in body||'recipe_id' in body||'wallet_public_ids' in body||'wallet_public_id' in body)await syncLinks(existing.id,body,req.workspaceId,existing.public_id,req.auth.user.id);res.json(await hydrate(await get(`SELECT * FROM food_moments WHERE id=?`,[existing.id]),req.workspaceId));}catch(e){next(e);}});
+router.get('/:publicId/workspace-assignments',async(req,res,next)=>{try{const existing=await visibleMoment(req.params.publicId,req.workspaceId);if(!existing)return res.status(404).json({error:'Food Moment nicht gefunden.'});if(Number(existing.owner_user_id)!==Number(req.auth.user.id))return res.status(403).json({error:'Nur der Eigentümer kann Workspace-Zuordnungen verwalten.'});const eligible=await workspaceRepository.listActiveWorkspacesForUser(req.auth.user.id);const rows=await all(`SELECT workspace_id FROM food_moment_workspace_assignments WHERE food_moment_id=?`,[existing.id]);const assigned=new Set(rows.map(r=>Number(r.workspace_id)));res.json({food_moment:{public_id:existing.public_id,title:existing.title},workspaces:eligible.map(w=>({public_id:w.public_id,name:w.name,workspace_type:w.workspace_type,is_owner:Number(w.is_owner)===1,is_assigned:assigned.has(Number(w.id))}))});}catch(e){next(e);}});
+router.put('/:publicId/workspace-assignments',async(req,res,next)=>{try{const existing=await visibleMoment(req.params.publicId,req.workspaceId);if(!existing)return res.status(404).json({error:'Food Moment nicht gefunden.'});if(Number(existing.owner_user_id)!==Number(req.auth.user.id))return res.status(403).json({error:'Nur der Eigentümer kann Workspace-Zuordnungen verwalten.'});const selected=uniqueStrings(req.body?.workspace_public_ids);if(!selected.length)return res.status(400).json({error:'Der Food Moment muss mindestens einem Workspace zugeordnet bleiben.'});const eligible=await workspaceRepository.listActiveWorkspacesForUser(req.auth.user.id);const byPublic=new Map(eligible.map(w=>[w.public_id,w]));if(selected.some(id=>!byPublic.has(id)))return res.status(403).json({error:'Ein oder mehrere ausgewählte Workspaces stehen dir nicht zur Verfügung.'});const ids=new Set(selected.map(id=>Number(byPublic.get(id).id)));await run('BEGIN');try{for(const w of eligible){if(ids.has(Number(w.id)))await run(`INSERT OR IGNORE INTO food_moment_workspace_assignments(food_moment_id,workspace_id,assigned_by_user_id) VALUES(?,?,?)`,[existing.id,w.id,req.auth.user.id]);else await run(`DELETE FROM food_moment_workspace_assignments WHERE food_moment_id=? AND workspace_id=?`,[existing.id,w.id]);}const preferred=ids.has(Number(existing.workspace_id))?existing.workspace_id:Number(byPublic.get(selected[0]).id);await run(`UPDATE food_moments SET workspace_id=? WHERE id=?`,[preferred,existing.id]);await run('COMMIT');}catch(e){await run('ROLLBACK').catch(()=>{});throw e;}const rows=await all(`SELECT workspace_id FROM food_moment_workspace_assignments WHERE food_moment_id=?`,[existing.id]);const assigned=new Set(rows.map(r=>Number(r.workspace_id)));res.json({food_moment:{public_id:existing.public_id,title:existing.title},workspaces:eligible.map(w=>({public_id:w.public_id,name:w.name,workspace_type:w.workspace_type,is_owner:Number(w.is_owner)===1,is_assigned:assigned.has(Number(w.id))})),current_workspace_still_assigned:assigned.has(Number(req.workspaceId))});}catch(e){next(e);}});
+router.delete("/:publicId",async(req,res,next)=>{try{const existing=await visibleMoment(req.params.publicId,req.workspaceId);if(!existing)return res.status(404).json({error:"Food Moment nicht gefunden."});if(Number(existing.owner_user_id)!==Number(req.auth.user.id))return res.status(403).json({error:'Nur der Eigentümer kann diesen Food Moment löschen.'});await run(`DELETE FROM food_moments WHERE id=?`,[existing.id]);res.json({success:true});}catch(e){next(e);}});
+module.exports=router;
