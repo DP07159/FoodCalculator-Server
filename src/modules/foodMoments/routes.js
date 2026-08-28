@@ -4,6 +4,7 @@ const { run, get, all } = require("../../database/database");
 const { requireAuthentication } = require("../../core/identity/middleware");
 const { requireWorkspaceContext } = require("../../core/workspaces/middleware");
 const { requireModuleEnabled } = require("../../core/platformAdmin/moduleAccessMiddleware");
+const workspaceRepository = require("../../core/workspaces/repository");
 
 const router = express.Router();
 router.use(requireAuthentication);
@@ -16,15 +17,24 @@ function intOrNull(value) { const n = Number(value); return Number.isInteger(n) 
 
 async function hydrate(row) {
     if (!row) return null;
-    const [recipes, inspirations] = await Promise.all([
+    const [recipes, inspirations, workspace] = await Promise.all([
         all(`SELECT r.id, r.name, r.calories, r.portions
-             FROM food_moment_recipe_links l JOIN recipes r ON r.id = l.recipe_id
-             WHERE l.food_moment_id = ? ORDER BY l.id`, [row.id]),
+             FROM food_moment_recipe_links l
+             JOIN recipes r ON r.id = l.recipe_id
+             WHERE l.food_moment_id = ?
+               AND (r.workspace_id = ? OR EXISTS (
+                    SELECT 1 FROM recipe_workspace_assignments a
+                    WHERE a.recipe_id = r.id AND a.workspace_id = ?
+               ))
+             ORDER BY l.id`, [row.id, row.workspace_id, row.workspace_id]),
         all(`SELECT w.public_id, w.title, w.category, w.source_url, w.source_image_url
-             FROM food_moment_wallet_links l JOIN wallet_items w ON w.id = l.wallet_item_id
-             WHERE l.food_moment_id = ? ORDER BY l.id`, [row.id])
+             FROM food_moment_wallet_links l
+             JOIN wallet_items w ON w.id = l.wallet_item_id
+             JOIN wallet_workspace_assignments a ON a.wallet_item_id = w.id AND a.workspace_id = ?
+             WHERE l.food_moment_id = ? ORDER BY l.id`, [row.workspace_id, row.id]),
+        get(`SELECT public_id, name FROM workspaces WHERE id = ?`, [row.workspace_id])
     ]);
-    return { ...row, recipes, inspirations };
+    return { ...row, recipes, inspirations, workspace };
 }
 
 router.get("/", async (req, res, next) => {
@@ -80,7 +90,16 @@ router.patch("/:publicId", async (req, res, next) => {
         const existing = await get(`SELECT * FROM food_moments WHERE public_id = ? AND workspace_id = ?`, [req.params.publicId, req.workspaceId]);
         if (!existing) return res.status(404).json({ error: "Food Moment nicht gefunden." });
         const body = req.body || {};
-        await run(`UPDATE food_moments SET title=?, timing_code=?, moment_date=?, moment_time=?, audience_code=?, people_count=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, [
+        let targetWorkspaceId = existing.workspace_id;
+        const targetWorkspacePublicId = clean(body.workspace_public_id);
+        if (targetWorkspacePublicId) {
+            const eligible = await workspaceRepository.listActiveWorkspacesForUser(req.auth.user.id);
+            const target = eligible.find(item => item.public_id === targetWorkspacePublicId);
+            if (!target) return res.status(403).json({ error: "Dieser Workspace steht dir nicht zur Verfügung." });
+            targetWorkspaceId = Number(target.id);
+        }
+        await run(`UPDATE food_moments SET workspace_id=?, title=?, timing_code=?, moment_date=?, moment_time=?, audience_code=?, people_count=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, [
+            targetWorkspaceId,
             clean(body.title ?? existing.title) || existing.title,
             clean(body.timing_code ?? existing.timing_code) || "open",
             clean(body.moment_date ?? existing.moment_date) || null,
@@ -88,7 +107,30 @@ router.patch("/:publicId", async (req, res, next) => {
             clean(body.audience_code ?? existing.audience_code) || "open",
             intOrNull(body.people_count ?? existing.people_count), clean(body.notes ?? existing.notes), existing.id
         ]);
+        if (targetWorkspaceId !== existing.workspace_id) {
+            await run(`DELETE FROM food_moment_recipe_links
+                       WHERE food_moment_id = ? AND recipe_id NOT IN (
+                           SELECT r.id FROM recipes r
+                           WHERE r.workspace_id = ? OR EXISTS (
+                               SELECT 1 FROM recipe_workspace_assignments a
+                               WHERE a.recipe_id = r.id AND a.workspace_id = ?
+                           )
+                       )`, [existing.id, targetWorkspaceId, targetWorkspaceId]);
+            await run(`DELETE FROM food_moment_wallet_links
+                       WHERE food_moment_id = ? AND wallet_item_id NOT IN (
+                           SELECT wallet_item_id FROM wallet_workspace_assignments WHERE workspace_id = ?
+                       )`, [existing.id, targetWorkspaceId]);
+        }
         res.json(await hydrate(await get(`SELECT * FROM food_moments WHERE id = ?`, [existing.id])));
+    } catch (error) { next(error); }
+});
+
+router.delete("/:publicId", async (req, res, next) => {
+    try {
+        const existing = await get(`SELECT id FROM food_moments WHERE public_id = ? AND workspace_id = ?`, [req.params.publicId, req.workspaceId]);
+        if (!existing) return res.status(404).json({ error: "Food Moment nicht gefunden." });
+        await run(`DELETE FROM food_moments WHERE id = ?`, [existing.id]);
+        res.json({ success: true });
     } catch (error) { next(error); }
 });
 
