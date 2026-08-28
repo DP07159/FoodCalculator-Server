@@ -183,6 +183,8 @@ async function ensureSchema() {
         )
     `);
 
+    await addColumnIfMissing("meal_plans", "owner_user_id", "INTEGER");
+
     await run(`
         CREATE TABLE IF NOT EXISTS inventory_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
