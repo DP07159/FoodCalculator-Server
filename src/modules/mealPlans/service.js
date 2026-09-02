@@ -4,7 +4,7 @@ const workspaceRepository = require("../../core/workspaces/repository");
 function normalizePlanRow(plan) {
     let data = [];
     try { data = JSON.parse(plan.data || "[]"); } catch { data = []; }
-    return { id: plan.id, name: plan.name, data, owner_user_id: plan.owner_user_id || null };
+    return { id: plan.id, name: plan.name, data, owner_user_id: plan.owner_user_id || null, plan_kind: plan.plan_kind || "template" };
 }
 
 async function getAllMealPlans(workspaceId) {
@@ -26,7 +26,7 @@ async function createMealPlan(payload, workspaceId, userId) {
     const name = typeof payload?.name === "string" ? payload.name.trim() : "";
     const data = Array.isArray(payload?.data) ? payload.data : null;
     if (!name || !data) return { error: "Name und Daten sind erforderlich." };
-    const result = await run(`INSERT INTO meal_plans (name, data, owner_user_id) VALUES (?, ?, ?)`, [name, JSON.stringify(data), userId]);
+    const result = await run(`INSERT INTO meal_plans (name, data, owner_user_id, plan_kind) VALUES (?, ?, ?, 'template')`, [name, JSON.stringify(data), userId]);
     await run(`INSERT OR IGNORE INTO meal_plan_workspace_assignments (meal_plan_id, workspace_id, assigned_by_user_id) VALUES (?, ?, ?)`, [result.lastID, workspaceId, userId]);
     return { value: normalizePlanRow(await get(`SELECT * FROM meal_plans WHERE id = ?`, [result.lastID])) };
 }
