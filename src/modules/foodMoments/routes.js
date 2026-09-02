@@ -103,6 +103,7 @@ async function syncLinks(momentId, body, workspaceId, publicMomentId, userId) {
         if (r) await run(`INSERT OR IGNORE INTO food_moment_recipe_links(food_moment_id,recipe_id) VALUES(?,?)`, [momentId, r.id]);
     }
     await run(`DELETE FROM food_moment_wallet_links WHERE food_moment_id=?`, [momentId]);
+    await run(`DELETE FROM wallet_item_relations WHERE target_type='food_moment' AND target_reference=?`, [publicMomentId]);
     for (const wid of walletIds) {
         const w = await get(`SELECT w.id FROM wallet_items w JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id WHERE w.public_id=? AND a.workspace_id=? LIMIT 1`, [wid, workspaceId]);
         if (w) {

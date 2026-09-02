@@ -15,6 +15,8 @@ router.get("/for-recipe/:recipeId", controller.getItemsForRecipe);
 router.get("/:publicId/recipe-links", controller.getRecipeLinks);
 router.put("/:publicId/recipe-links", controller.updateRecipeLinks);
 router.post("/:publicId/recipe-links", controller.addRecipeLink);
+router.get("/:publicId/food-moment-links", controller.getFoodMomentLinks);
+router.put("/:publicId/food-moment-links", controller.updateFoodMomentLinks);
 router.get("/:publicId/workspace-assignments", controller.getWorkspaceAssignments);
 router.put("/:publicId/workspace-assignments", controller.updateWorkspaceAssignments);
 router.patch("/:publicId", controller.update);

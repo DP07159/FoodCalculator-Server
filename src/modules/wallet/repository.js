@@ -5,7 +5,8 @@ const visibleSelect = `
         wi.*,
         u.display_name AS created_by_name,
         (SELECT COUNT(*) FROM wallet_workspace_assignments wwa_count WHERE wwa_count.wallet_item_id = wi.id) AS workspace_assignment_count,
-        (SELECT COUNT(*) FROM wallet_recipe_links wrl_count WHERE wrl_count.wallet_item_id = wi.id) AS recipe_link_count
+        (SELECT COUNT(*) FROM wallet_recipe_links wrl_count WHERE wrl_count.wallet_item_id = wi.id) AS recipe_link_count,
+        (SELECT COUNT(*) FROM food_moment_wallet_links fmwl_count WHERE fmwl_count.wallet_item_id = wi.id) AS food_moment_link_count
     FROM wallet_items wi
     LEFT JOIN users u ON u.id = wi.created_by_user_id`;
 
@@ -137,6 +138,19 @@ async function listItemsForRecipe(recipeId, workspaceId) {
         ORDER BY wi.saved_at DESC, wi.id DESC`, [recipeId, workspaceId]);
 }
 
+async function listFoodMomentLinksForItem(walletItemId, workspaceId) {
+    return all(`SELECT DISTINCT fm.id,fm.public_id,fm.title,fm.moment_date,fm.moment_time,fm.starts_at,fm.status,
+            CASE WHEN fmwl.wallet_item_id IS NULL THEN 0 ELSE 1 END AS is_linked
+        FROM food_moments fm
+        LEFT JOIN food_moment_workspace_assignments fmwa ON fmwa.food_moment_id = fm.id
+        LEFT JOIN food_moment_wallet_links fmwl ON fmwl.food_moment_id = fm.id AND fmwl.wallet_item_id = ?
+        WHERE (fm.workspace_id = ? OR fmwa.workspace_id = ?)
+        ORDER BY CASE WHEN fm.starts_at IS NULL THEN 1 ELSE 0 END, fm.starts_at ASC, fm.created_at DESC`,
+        [walletItemId, workspaceId, workspaceId]);
+}
+async function addFoodMomentLink({walletItemId, foodMomentId}) { return run(`INSERT OR IGNORE INTO food_moment_wallet_links (food_moment_id, wallet_item_id) VALUES (?, ?)`,[foodMomentId,walletItemId]); }
+async function removeFoodMomentLink(walletItemId, foodMomentId) { return run(`DELETE FROM food_moment_wallet_links WHERE wallet_item_id = ? AND food_moment_id = ?`,[walletItemId,foodMomentId]); }
+
 module.exports = {
     listItems,
     findByPublicId,
@@ -151,5 +165,8 @@ module.exports = {
     listRecipeLinksForItem,
     addRecipeLink,
     removeRecipeLink,
-    listItemsForRecipe
+    listItemsForRecipe,
+    listFoodMomentLinksForItem,
+    addFoodMomentLink,
+    removeFoodMomentLink
 };
