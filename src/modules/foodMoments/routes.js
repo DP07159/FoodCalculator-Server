@@ -47,9 +47,11 @@ function legacyPartsFromStart(startsAt, isAllDay) {
     return { momentDate: date, momentTime: time || null };
 }
 function deriveTimingCode({ timingCode, startsAt, isAllDay }) {
-    const requested = clean(timingCode);
-    if (requested && TIMING_CODES.has(requested)) return requested;
+    // A real date/time always wins over a stale legacy "open" state.
+    // This keeps edited/repeated moments from displaying "Noch offen" after scheduling.
     if (!startsAt) return "open";
+    const requested = clean(timingCode);
+    if (requested === "dated" || requested === "scheduled") return isAllDay ? "dated" : "scheduled";
     return isAllDay ? "dated" : "scheduled";
 }
 function resolveTiming(body, existing = null) {
@@ -85,14 +87,16 @@ async function visibleMoment(publicIdValue, workspaceId) {
 }
 async function hydrate(row, workspaceId) {
     if (!row) return null;
-    const [recipes, inspirations, workspace, assignments, repeatedFrom] = await Promise.all([
+    const [recipes, inspirations, workspace, assignments, repeatedFrom, parentRows, childRows] = await Promise.all([
         all(`SELECT r.id,r.name,r.calories,r.portions FROM food_moment_recipe_links l JOIN recipes r ON r.id=l.recipe_id WHERE l.food_moment_id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) ORDER BY l.id`, [row.id, workspaceId, workspaceId]),
         all(`SELECT w.public_id,w.title,w.category,w.source_url,w.source_image_url FROM food_moment_wallet_links l JOIN wallet_items w ON w.id=l.wallet_item_id JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id AND a.workspace_id=? WHERE l.food_moment_id=? ORDER BY l.id`, [workspaceId, row.id]),
         get(`SELECT public_id,name FROM workspaces WHERE id=?`, [row.workspace_id]),
         all(`SELECT ws.public_id,ws.name FROM food_moment_workspace_assignments a JOIN workspaces ws ON ws.id=a.workspace_id WHERE a.food_moment_id=? ORDER BY ws.name`, [row.id]),
-        row.repeated_from_food_moment_id ? get(`SELECT public_id,title FROM food_moments WHERE id=?`, [row.repeated_from_food_moment_id]) : null
+        row.repeated_from_food_moment_id ? get(`SELECT public_id,title FROM food_moments WHERE id=?`, [row.repeated_from_food_moment_id]) : null,
+        all(`SELECT p.public_id,p.title FROM food_moment_composition_links l JOIN food_moments p ON p.id=l.parent_food_moment_id WHERE l.child_food_moment_id=?`, [row.id]),
+        all(`SELECT c.public_id,c.title,c.moment_date,c.moment_time,c.starts_at,c.is_all_day FROM food_moment_composition_links l JOIN food_moments c ON c.id=l.child_food_moment_id WHERE l.parent_food_moment_id=? ORDER BY COALESCE(c.starts_at,c.moment_date),c.created_at`, [row.id])
     ]);
-    return { ...row, is_all_day: Number(row.is_all_day) === 1, recipes, inspirations, workspace, workspace_assignments: assignments, repeated_from: repeatedFrom || null };
+    return { ...row, is_all_day: Number(row.is_all_day) === 1, recipes, inspirations, workspace, workspace_assignments: assignments, repeated_from: repeatedFrom || null, parent_food_moments: parentRows, child_food_moments: childRows, is_component: parentRows.length > 0 };
 }
 async function syncLinks(momentId, body, workspaceId, publicMomentId, userId) {
     const recipeIds = uniqueInts(body.recipe_ids ?? (body.recipe_id ? [body.recipe_id] : []));
@@ -112,6 +116,33 @@ async function syncLinks(momentId, body, workspaceId, publicMomentId, userId) {
         }
     }
 }
+async function syncComposition(momentId, body, workspaceId) {
+    if (!Object.prototype.hasOwnProperty.call(body, "parent_food_moment_public_id")) return;
+    const parentPublicId = clean(body.parent_food_moment_public_id);
+    await run(`DELETE FROM food_moment_composition_links WHERE child_food_moment_id=?`, [momentId]);
+    if (!parentPublicId) return;
+    const parent = await visibleMoment(parentPublicId, workspaceId);
+    if (!parent || Number(parent.id) === Number(momentId)) return;
+    // Prevent direct cycles. With one parent per child this also blocks the common two-node cycle.
+    const parentIsChild = await get(`SELECT 1 AS ok FROM food_moment_composition_links WHERE parent_food_moment_id=? AND child_food_moment_id=? LIMIT 1`, [momentId, parent.id]);
+    if (parentIsChild) return;
+    await run(`INSERT OR REPLACE INTO food_moment_composition_links(parent_food_moment_id,child_food_moment_id) VALUES(?,?)`, [parent.id, momentId]);
+}
+
+async function syncCompositionChildren(parentMomentId, body, workspaceId) {
+    if (!Object.prototype.hasOwnProperty.call(body, "child_food_moment_public_ids")) return;
+    const requested = uniqueStrings(body.child_food_moment_public_ids);
+    await run(`DELETE FROM food_moment_composition_links WHERE parent_food_moment_id=?`, [parentMomentId]);
+    for (const childPublicId of requested) {
+        const child = await visibleMoment(childPublicId, workspaceId);
+        if (!child || Number(child.id) === Number(parentMomentId)) continue;
+        const wouldCycle = await get(`SELECT 1 AS ok FROM food_moment_composition_links WHERE parent_food_moment_id=? AND child_food_moment_id=? LIMIT 1`, [child.id, parentMomentId]);
+        if (wouldCycle) continue;
+        await run(`DELETE FROM food_moment_composition_links WHERE child_food_moment_id=?`, [child.id]);
+        await run(`INSERT OR IGNORE INTO food_moment_composition_links(parent_food_moment_id,child_food_moment_id) VALUES(?,?)`, [parentMomentId, child.id]);
+    }
+}
+
 async function createMoment(body, workspaceId, userId, options = {}) {
     const title = clean(body.title);
     if (!title) return { error: "Bitte gib deinem Food Moment einen Namen." };
@@ -127,6 +158,8 @@ async function createMoment(body, workspaceId, userId, options = {}) {
     ]);
     await run(`INSERT OR IGNORE INTO food_moment_workspace_assignments(food_moment_id,workspace_id,assigned_by_user_id) VALUES(?,?,?)`, [result.lastID, workspaceId, userId]);
     await syncLinks(result.lastID, body, workspaceId, id, userId);
+    await syncComposition(result.lastID, body, workspaceId);
+    await syncCompositionChildren(result.lastID, body, workspaceId);
     return { value: await hydrate(await get(`SELECT * FROM food_moments WHERE id=?`, [result.lastID]), workspaceId) };
 }
 
@@ -204,6 +237,8 @@ router.patch("/:publicId", async (req, res, next) => {
             nextTitle, timing.timingCode, timing.momentDate, timing.momentTime, timing.startsAt, timing.endsAt, timing.isAllDay, nextAudience, nextPeople, nextStatus, nextNotes, nextSource, nextSourceReference, existing.id
         ]);
         if ("recipe_ids" in body || "recipe_id" in body || "wallet_public_ids" in body || "wallet_public_id" in body) await syncLinks(existing.id, body, req.workspaceId, existing.public_id, req.auth.user.id);
+        await syncComposition(existing.id, body, req.workspaceId);
+        await syncCompositionChildren(existing.id, body, req.workspaceId);
         res.json(await hydrate(await get(`SELECT * FROM food_moments WHERE id=?`, [existing.id]), req.workspaceId));
     } catch (e) { next(e); }
 });
