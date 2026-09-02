@@ -76,3 +76,63 @@ async function setWorkspaceAssignments(planId, workspaceId, userId, publicIds) {
     return getWorkspaceAssignments(planId, selectedIds.has(Number(workspaceId))?workspaceId:Number(byId.get(selected[0]).id), userId);
 }
 module.exports={getAllMealPlans,getMealPlanById,createMealPlan,updateMealPlan,deleteMealPlan,getWorkspaceAssignments,setWorkspaceAssignments};
+
+/* Paket 2: konkrete Planung auf Food-Moment-Basis */
+const crypto = require('crypto');
+function planningPublicId(){ return `fm_${crypto.randomBytes(12).toString('hex')}`; }
+function validDate(v){ return /^\d{4}-\d{2}-\d{2}$/.test(String(v||'')); }
+function validMeal(v){ return ['breakfast','lunch','dinner','snack'].includes(String(v||'')); }
+function slotRef(date,mealType){ return `planning_slot|${date}|${mealType}`; }
+function defaultTime(mealType){ return ({breakfast:'08:00',lunch:'12:30',dinner:'19:00',snack:'15:30'})[mealType] || '12:00'; }
+async function hydratePlanningMoment(row, workspaceId){
+    if(!row) return null;
+    const recipes=await all(`SELECT r.id,r.name,r.calories,r.portions FROM food_moment_recipe_links l JOIN recipes r ON r.id=l.recipe_id WHERE l.food_moment_id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) ORDER BY l.id`,[row.id,workspaceId,workspaceId]);
+    const inspirations=await all(`SELECT w.public_id,w.title,w.category,w.source_url,w.source_image_url FROM food_moment_wallet_links l JOIN wallet_items w ON w.id=l.wallet_item_id JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id AND a.workspace_id=? WHERE l.food_moment_id=? ORDER BY l.id`,[workspaceId,row.id]);
+    const parts=String(row.source_reference||'').split('|');
+    return {...row,is_all_day:Number(row.is_all_day)===1,recipes,inspirations,planning_date:parts[1]||String(row.starts_at||'').slice(0,10),meal_type:parts[2]||null};
+}
+async function getPlanningWeek(startDate, workspaceId){
+    if(!validDate(startDate)) return {error:'Ungültiger Wochenstart.'};
+    const rows=await all(`SELECT DISTINCT fm.* FROM food_moments fm LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE (fm.workspace_id=? OR a.workspace_id=?) AND fm.source_code='planning_slot' AND fm.source_reference LIKE 'planning_slot|%' AND date(fm.starts_at)>=date(?) AND date(fm.starts_at)<date(?, '+7 day') ORDER BY fm.starts_at`,[workspaceId,workspaceId,startDate,startDate]);
+    return {value:await Promise.all(rows.map(r=>hydratePlanningMoment(r,workspaceId)))};
+}
+async function upsertPlanningSlot(payload, workspaceId, userId){
+    const date=String(payload?.date||''); const mealType=String(payload?.meal_type||'');
+    if(!validDate(date)||!validMeal(mealType)) return {error:'Datum oder Mahlzeit ist ungültig.'};
+    const recipeId=Number(payload?.recipe_id)||null; const walletPublicId=String(payload?.wallet_public_id||'').trim()||null;
+    if(!recipeId && !walletPublicId) return {error:'Bitte Rezept oder Inspiration auswählen.'};
+    let title='Food Moment';
+    if(recipeId){ const r=await get(`SELECT r.id,r.name FROM recipes r WHERE r.id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?))`,[recipeId,workspaceId,workspaceId]); if(!r)return {error:'Rezept nicht gefunden.'}; title=r.name; }
+    let wallet=null;
+    if(walletPublicId){ wallet=await get(`SELECT w.id,w.title,w.source_page_title FROM wallet_items w JOIN wallet_workspace_assignments a ON a.wallet_item_id=w.id AND a.workspace_id=? WHERE w.public_id=? LIMIT 1`,[workspaceId,walletPublicId]); if(!wallet)return {error:'Inspiration nicht gefunden.'}; title=wallet.title||wallet.source_page_title||'Inspiration'; }
+    const ref=slotRef(date,mealType); const startsAt=`${date}T${defaultTime(mealType)}:00`;
+    let existing=await get(`SELECT fm.* FROM food_moments fm LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE fm.source_code='planning_slot' AND fm.source_reference=? AND (fm.workspace_id=? OR a.workspace_id=?) LIMIT 1`,[ref,workspaceId,workspaceId]);
+    await run('BEGIN');
+    try{
+        let id;
+        if(existing){ id=existing.id; await run(`UPDATE food_moments SET title=?,starts_at=?,moment_date=?,moment_time=?,timing_code='scheduled',is_all_day=0,status='planned',updated_at=CURRENT_TIMESTAMP WHERE id=?`,[title,startsAt,date,defaultTime(mealType),id]); }
+        else { const pub=planningPublicId(); const result=await run(`INSERT INTO food_moments(public_id,workspace_id,owner_user_id,title,timing_code,moment_date,moment_time,starts_at,is_all_day,audience_code,status,source_code,source_reference) VALUES(?,?,?,?,'scheduled',?,?,?,0,'open','planned','planning_slot',?)`,[pub,workspaceId,userId,title,date,defaultTime(mealType),startsAt,ref]); id=result.lastID; await run(`INSERT OR IGNORE INTO food_moment_workspace_assignments(food_moment_id,workspace_id,assigned_by_user_id) VALUES(?,?,?)`,[id,workspaceId,userId]); }
+        await run(`DELETE FROM food_moment_recipe_links WHERE food_moment_id=?`,[id]); await run(`DELETE FROM food_moment_wallet_links WHERE food_moment_id=?`,[id]);
+        if(recipeId) await run(`INSERT INTO food_moment_recipe_links(food_moment_id,recipe_id) VALUES(?,?)`,[id,recipeId]);
+        if(wallet) { await run(`INSERT INTO food_moment_wallet_links(food_moment_id,wallet_item_id) VALUES(?,?)`,[id,wallet.id]); const pub=(await get(`SELECT public_id FROM food_moments WHERE id=?`,[id])).public_id; await run(`INSERT OR IGNORE INTO wallet_item_relations(wallet_item_id,target_type,target_reference,created_by_user_id) VALUES(?,'food_moment',?,?)`,[wallet.id,pub,userId]); }
+        await run('COMMIT'); existing=await get(`SELECT * FROM food_moments WHERE id=?`,[id]);
+        return {value:await hydratePlanningMoment(existing,workspaceId)};
+    }catch(e){await run('ROLLBACK').catch(()=>{});throw e;}
+}
+async function deletePlanningSlot(date,mealType,workspaceId,userId){
+    if(!validDate(date)||!validMeal(mealType)) return {error:'Datum oder Mahlzeit ist ungültig.'};
+    const row=await get(`SELECT fm.* FROM food_moments fm LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE fm.source_code='planning_slot' AND fm.source_reference=? AND (fm.workspace_id=? OR a.workspace_id=?) LIMIT 1`,[slotRef(date,mealType),workspaceId,workspaceId]);
+    if(!row) return {value:{success:true}};
+    if(Number(row.owner_user_id)!==Number(userId)) return {forbidden:true,error:'Nur der Eigentümer kann diesen Planungseintrag entfernen.'};
+    await run(`DELETE FROM food_moments WHERE id=?`,[row.id]); return {value:{success:true}};
+}
+async function applyTemplateToWeek(planId,startDate,workspaceId,userId){
+    const plan=await getMealPlanById(planId,workspaceId); if(!plan)return {notFound:true}; if(!validDate(startDate))return {error:'Ungültiger Wochenstart.'};
+    const base=new Date(`${startDate}T12:00:00`); const dayIndex={Montag:0,Dienstag:1,Mittwoch:2,Donnerstag:3,Freitag:4,Samstag:5,Sonntag:6}; let count=0;
+    for(const entry of plan.data||[]){ if(!entry||!validMeal(entry.mealType)||dayIndex[entry.day]===undefined)continue; const d=new Date(base); d.setDate(base.getDate()+dayIndex[entry.day]); const date=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; const payload={date,meal_type:entry.mealType,recipe_id:entry.recipeId||null,wallet_public_id:entry.walletId||null}; if(!payload.recipe_id&&!payload.wallet_public_id)continue; const r=await upsertPlanningSlot(payload,workspaceId,userId); if(!r.error)count++; }
+    return {value:{success:true,created_or_updated:count}};
+}
+module.exports.getPlanningWeek=getPlanningWeek;
+module.exports.upsertPlanningSlot=upsertPlanningSlot;
+module.exports.deletePlanningSlot=deletePlanningSlot;
+module.exports.applyTemplateToWeek=applyTemplateToWeek;
