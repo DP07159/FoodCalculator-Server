@@ -232,6 +232,71 @@ function findMembershipForAdministration(membershipId) {
     );
 }
 
+
+function listAssignableWorkspaces() {
+    return all(
+        `SELECT
+            w.id,
+            w.public_id,
+            w.name,
+            w.workspace_type,
+            w.status,
+            w.owner_user_id,
+            u.display_name AS owner_display_name,
+            u.email AS owner_email
+         FROM workspaces w
+         LEFT JOIN users u ON u.id = w.owner_user_id
+         WHERE w.archived_at IS NULL
+           AND w.status = 'active'
+         ORDER BY w.name COLLATE NOCASE ASC, w.id ASC`
+    );
+}
+
+function findWorkspaceByPublicId(publicId) {
+    return get(
+        `SELECT *
+         FROM workspaces
+         WHERE public_id = ?
+           AND archived_at IS NULL
+           AND status = 'active'
+         LIMIT 1`,
+        [publicId]
+    );
+}
+
+async function upsertWorkspaceMembership({ workspaceId, userId }) {
+    await run(
+        `INSERT INTO workspace_memberships (
+            workspace_id, user_id, status, is_owner, joined_at, updated_at
+         ) VALUES (?, ?, 'active', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(workspace_id, user_id)
+         DO UPDATE SET
+            status = 'active',
+            joined_at = COALESCE(workspace_memberships.joined_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP`,
+        [workspaceId, userId]
+    );
+
+    return get(
+        `SELECT *
+         FROM workspace_memberships
+         WHERE workspace_id = ? AND user_id = ?
+         LIMIT 1`,
+        [workspaceId, userId]
+    );
+}
+
+async function endWorkspaceMembership(membershipId) {
+    return run(
+        `UPDATE workspace_memberships
+         SET status = 'left',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND is_owner = 0`,
+        [membershipId]
+    );
+}
+
 async function listCatalog() {
     const [roles, capabilities, modules] = await Promise.all([
         all(
@@ -267,5 +332,9 @@ module.exports = {
     listMembershipCapabilities,
     listModulesForMembership,
     findMembershipForAdministration,
-    listCatalog
+    listCatalog,
+    listAssignableWorkspaces,
+    findWorkspaceByPublicId,
+    upsertWorkspaceMembership,
+    endWorkspaceMembership
 };

@@ -1,4 +1,8 @@
+const crypto = require("crypto");
+const database = require("../../database/database");
 const identityRepository = require("../identity/repository");
+const identityService = require("../identity/service");
+const authorizationService = require("../authorization/service");
 const authorizationRepository = require("../authorization/repository");
 const accessManagementService = require("../authorization/accessManagementService");
 const moduleAccessRepository = require("./moduleAccessRepository");
@@ -8,6 +12,164 @@ const {
     validateBoolean,
     normalizeCode
 } = require("./validator");
+const { normalizeEmail, validateEmail } = require("../identity/validator");
+
+
+function generateSetupPassword() {
+    return `${crypto.randomBytes(9).toString("base64url")}A7!`;
+}
+
+function normalizeWorkspaceAssignments(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    const result = [];
+    for (const item of value) {
+        const workspacePublicId = String(item?.workspace_public_id || "").trim();
+        const roleCode = normalizeCode(item?.role_code || "standard_user");
+        if (!workspacePublicId || seen.has(workspacePublicId)) continue;
+        seen.add(workspacePublicId);
+        result.push({ workspacePublicId, roleCode });
+    }
+    return result;
+}
+
+async function createManagedUser(payload = {}, actorUser) {
+    const email = normalizeEmail(payload.email);
+    const displayName = String(payload.display_name || "").replace(/\s+/g, " ").trim();
+    const platformRole = normalizeCode(payload.platform_role || "user");
+    const assignments = normalizeWorkspaceAssignments(payload.workspace_assignments);
+
+    const emailError = validateEmail(email);
+    if (emailError) return { error: emailError };
+    if (!displayName) return { error: "Name ist erforderlich." };
+    if (displayName.length > 120) return { error: "Name ist zu lang." };
+    if (!["user", "platform_admin"].includes(platformRole)) {
+        return { error: "Plattformrolle ist ungültig." };
+    }
+    if (await identityRepository.findUserByEmail(email)) {
+        return { error: "Für diese E-Mail-Adresse existiert bereits ein Benutzer." };
+    }
+
+    for (const assignment of assignments) {
+        const workspace = await repository.findWorkspaceByPublicId(assignment.workspacePublicId);
+        if (!workspace) return { error: `Workspace ${assignment.workspacePublicId} wurde nicht gefunden.` };
+        const role = (await repository.listCatalog()).roles.find(item => item.code === assignment.roleCode);
+        if (!role) return { error: `Workspace-Rolle ${assignment.roleCode} wurde nicht gefunden.` };
+    }
+
+    const setupPassword = generateSetupPassword();
+    const passwordHash = await identityService.hashPassword(setupPassword);
+
+    await database.run("BEGIN");
+    try {
+        const user = await identityRepository.createUser({
+            publicId: crypto.randomUUID(),
+            email,
+            displayName,
+            status: "active",
+            locale: "de-DE"
+        });
+        await identityRepository.createPasswordCredential(user.id, passwordHash);
+
+        if (platformRole === "platform_admin") {
+            const role = await repository.findPlatformAdminRole();
+            await repository.grantPlatformAdmin({
+                userId: user.id,
+                roleId: role.id,
+                assignedByUserId: actorUser.id
+            });
+        }
+
+        for (const assignment of assignments) {
+            const workspace = await repository.findWorkspaceByPublicId(assignment.workspacePublicId);
+            const membership = await repository.upsertWorkspaceMembership({
+                workspaceId: workspace.id,
+                userId: user.id
+            });
+            await authorizationService.assignRoleWithDefaults({
+                membershipId: membership.id,
+                roleCode: assignment.roleCode,
+                assignedByUserId: actorUser.id
+            });
+        }
+
+        await database.run("COMMIT");
+        return {
+            value: {
+                user: {
+                    public_id: user.public_id,
+                    email: user.email,
+                    display_name: user.display_name,
+                    status: user.status,
+                    is_platform_admin: platformRole === "platform_admin"
+                },
+                setup_password: setupPassword,
+                workspace_assignments: assignments.length
+            }
+        };
+    } catch (error) {
+        await database.run("ROLLBACK").catch(() => {});
+        throw error;
+    }
+}
+
+async function listWorkspaces() {
+    const rows = await repository.listAssignableWorkspaces();
+    return rows.map(row => ({
+        public_id: row.public_id,
+        name: row.name,
+        workspace_type: row.workspace_type,
+        status: row.status,
+        owner: row.owner_user_id ? {
+            display_name: row.owner_display_name,
+            email: row.owner_email
+        } : null
+    }));
+}
+
+async function addUserMembership({ publicId, workspacePublicId, roleCode, actorUser }) {
+    const user = await repository.findUserByPublicId(publicId);
+    if (!user) return { notFound: true };
+
+    const workspace = await repository.findWorkspaceByPublicId(workspacePublicId);
+    if (!workspace) return { error: "Workspace wurde nicht gefunden." };
+
+    const code = normalizeCode(roleCode || "standard_user");
+    const catalog = await repository.listCatalog();
+    if (!catalog.roles.some(role => role.code === code)) {
+        return { error: "Workspace-Rolle wurde nicht gefunden." };
+    }
+
+    const membership = await repository.upsertWorkspaceMembership({
+        workspaceId: workspace.id,
+        userId: user.id
+    });
+
+    const roleResult = await accessManagementService.setManagedRole({
+        email: user.email,
+        workspacePublicId: workspace.public_id,
+        roleCode: code,
+        actorEmail: actorUser.email
+    });
+    if (roleResult?.error) return { error: roleResult.error };
+
+    return { value: await getUserDetail(publicId) };
+}
+
+async function removeUserMembership({ publicId, membershipId }) {
+    const user = await repository.findUserByPublicId(publicId);
+    if (!user) return { notFound: true };
+
+    const membership = await repository.findMembershipForAdministration(membershipId);
+    if (!membership || membership.user_id !== user.id) return { notFound: true };
+    if (Number(membership.is_owner) === 1) {
+        return { error: "Owner-Mitgliedschaften können nicht entfernt werden." };
+    }
+
+    await repository.endWorkspaceMembership(membership.id);
+    return { value: await getUserDetail(publicId) };
+}
+
 
 function mapUserRow(row) {
     return {
@@ -311,5 +473,9 @@ module.exports = {
     getCatalog,
     setMembershipRole,
     setMembershipCapability,
-    setMembershipModule
+    setMembershipModule,
+    createManagedUser,
+    listWorkspaces,
+    addUserMembership,
+    removeUserMembership
 };
