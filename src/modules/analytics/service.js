@@ -15,8 +15,7 @@ function classifyRequest(method, path) {
     if (method === 'POST' && p === '/recipes') return ['recipe_created','module','recipe'];
     if (method === 'PUT' && /^\/recipes\/\d+$/.test(p)) return ['recipe_updated','module','recipe'];
     if (method === 'POST' && p === '/wallet') return ['wallet_saved','module','wallet'];
-    if (method === 'PUT' && /\/wallet\/[^/]+\/recipe-links$/.test(p)) return ['wallet_recipe_connected','connection','wallet_recipe'];
-    if (method === 'POST' && /\/wallet\/[^/]+\/recipe-links$/.test(p)) return ['wallet_recipe_connected','connection','wallet_recipe'];
+    if ((method === 'PUT' || method === 'POST') && /\/wallet\/[^/]+\/recipe-links$/.test(p)) return ['wallet_recipe_connected','connection','wallet_recipe'];
     if (method === 'PUT' && /\/wallet\/[^/]+\/food-moment-links$/.test(p)) return ['wallet_food_moment_connected','connection','wallet_food_moment'];
     if (method === 'POST' && p === '/food-moments') return ['food_moment_created','module','food_moment'];
     if (method === 'PATCH' && /^\/food-moments\/[^/]+$/.test(p)) return ['food_moment_updated','module','food_moment'];
@@ -60,7 +59,14 @@ async function getSummary(workspaceId, days=28) {
              FROM product_events WHERE workspace_id=? AND created_at>=datetime('now',?)`, [workspaceId,since]),
         all(`SELECT event_name,event_category,COUNT(*) count,COUNT(DISTINCT user_id) users FROM product_events WHERE workspace_id=? AND created_at>=datetime('now',?) GROUP BY event_name,event_category ORDER BY count DESC,event_name`, [workspaceId,since]),
         all(`SELECT date(created_at) day, COUNT(*) events, COUNT(DISTINCT user_id) users, SUM(CASE WHEN event_category='connection' THEN 1 ELSE 0 END) connections FROM product_events WHERE workspace_id=? AND created_at>=datetime('now',?) GROUP BY date(created_at) ORDER BY day`, [workspaceId,since]),
-        all(`SELECT user_id, COUNT(*) events, COUNT(DISTINCT session_id) sessions, SUM(CASE WHEN event_category='connection' THEN 1 ELSE 0 END) connections, MIN(created_at) first_seen, MAX(created_at) last_seen FROM product_events WHERE workspace_id=? AND created_at>=datetime('now',?) AND user_id IS NOT NULL GROUP BY user_id ORDER BY events DESC`, [workspaceId,since])
+        all(`SELECT pe.user_id, u.display_name, u.email, COUNT(*) events, COUNT(DISTINCT pe.session_id) sessions,
+                    SUM(CASE WHEN pe.event_category='connection' THEN 1 ELSE 0 END) connections,
+                    MIN(pe.created_at) first_seen, MAX(pe.created_at) last_seen
+             FROM product_events pe
+             LEFT JOIN users u ON u.id=pe.user_id
+             WHERE pe.workspace_id=? AND pe.created_at>=datetime('now',?) AND pe.user_id IS NOT NULL
+             GROUP BY pe.user_id,u.display_name,u.email
+             ORDER BY events DESC, last_seen DESC`, [workspaceId,since])
     ]);
     const eventMap = Object.fromEntries(events.map(e=>[e.event_name,Number(e.count)]));
     const journeySignals = {
@@ -70,6 +76,13 @@ async function getSummary(workspaceId, days=28) {
         weekly_planning: (eventMap.planning_slot_saved||0) + (eventMap.week_template_applied||0),
         shopping: (eventMap.recipe_to_shopping||0) + (eventMap.food_moment_to_shopping||0) + (eventMap.shopping_item_toggled||0)
     };
-    return { range_days:safeDays, totals:{...totals, total_events:Number(totals?.total_events||0), active_users:Number(totals?.active_users||0), sessions:Number(totals?.sessions||0), connection_events:Number(totals?.connection_events||0)}, events:events.map(e=>({...e,count:Number(e.count),users:Number(e.users)})), daily:daily.map(d=>({...d,events:Number(d.events),users:Number(d.users),connections:Number(d.connections||0)})), users:users.map(u=>({...u,events:Number(u.events),sessions:Number(u.sessions),connections:Number(u.connections||0)})), journey_signals:journeySignals };
+    return {
+        range_days:safeDays,
+        totals:{...totals, total_events:Number(totals?.total_events||0), active_users:Number(totals?.active_users||0), sessions:Number(totals?.sessions||0), connection_events:Number(totals?.connection_events||0)},
+        events:events.map(e=>({...e,count:Number(e.count),users:Number(e.users)})),
+        daily:daily.map(d=>({...d,events:Number(d.events),users:Number(d.users),connections:Number(d.connections||0)})),
+        users:users.map(u=>({...u,events:Number(u.events),sessions:Number(u.sessions),connections:Number(u.connections||0)})),
+        journey_signals:journeySignals
+    };
 }
 module.exports={recordEvent,trackingMiddleware,getSummary};
