@@ -101,26 +101,27 @@ const MODULE_DEFINITIONS = Object.freeze([
         ]
     },
     {
-        code: "shopping",
-        name: "Einkauf",
-        description: "Gemeinsame Einkaufsliste des aktuellen Workspaces",
+        code: "inventory",
+        name: "Inventar",
+        description: "Bestände, Lagerorte und Inventarverwaltung",
+        required_privilege: "inventory.view",
         navigation: {
-            label: "Einkauf",
-            short_label: "Einkauf",
-            href: "/shopping.html",
-            icon: "shopping",
+            label: "Inventar",
+            short_label: "Inventar",
+            href: "/inventory.html",
+            icon: "inventory",
             primary: true,
             order: 40
         },
         home_actions: [
             {
-                code: "shopping_list",
-                label: "Einkaufen",
-                description: "Was brauchst du für deine Food Moments?",
-                href: "/shopping.html",
-                icon: "shopping",
-                order: 40,
-                intent_keywords: ["einkauf", "einkaufen", "einkaufsliste", "besorgen", "zutaten"]
+                code: "maintain_inventory",
+                label: "Was da ist",
+                description: "Mach etwas aus dem, was du schon hast",
+                href: "/inventory.html",
+                icon: "inventory",
+                order: 30,
+                intent_keywords: ["inventar", "vorrat", "lager", "kühlschrank", "kuehlschrank", "vorhanden"]
             }
         ]
     }
