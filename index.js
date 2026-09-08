@@ -361,6 +361,18 @@ app.get("/food-items/resolve", async (req, res) => {
 
 
 
+// API-Fehler immer als JSON ausgeben. So können Frontends Fehlertexte
+// zuverlässig verarbeiten und versuchen nie, eine HTML-Fehlerseite als JSON zu parsen.
+app.use((error, req, res, next) => {
+    console.error(`Unbehandelter API-Fehler bei ${req.method} ${req.originalUrl}:`, error);
+    if (res.headersSent) return next(error);
+    res.status(error?.status || 500).json({
+        error: error?.status && error.status < 500
+            ? (error.message || "Anfrage konnte nicht verarbeitet werden.")
+            : "Serverfehler. Bitte versuche es erneut."
+    });
+});
+
 async function startServer() {
     const connection = database.getDefaultConnection();
     await database.configureDatabase(connection);
