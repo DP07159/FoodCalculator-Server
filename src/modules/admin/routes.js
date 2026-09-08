@@ -6,8 +6,12 @@ const ingredients = require("../../shared/ingredients");
 const foodItemService = require("../foodItems/service");
 const inventoryService = require("../inventory/service");
 const adminService = require("./service");
+const { requireAuthentication } = require("../../core/identity/middleware");
+const { requirePlatformAdminAfterAuthentication } = require("../../core/platformAdmin/middleware");
 
 const buildFoodIdentity = ingredients.buildFoodIdentity;
+
+router.use("/admin", requireAuthentication, requirePlatformAdminAfterAuthentication);
 
 router.get("/admin/inventory-cleanup-preview", async (req, res) => {
     try {
