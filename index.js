@@ -305,7 +305,7 @@ app.use(mealPlanRoutes);
 app.use("/recipes", recipeRoutes);
 app.use(recipeQueryRoutes);
 app.use(recipeWriteRoutes);
-app.use(requireAuthentication, requirePlatformAdminAfterAuthentication, adminRoutes);
+app.use(adminRoutes);
 app.use("/auth", identity.routes);
 app.use("/workspaces", workspaces.routes);
 app.use("/authorization", authorization.routes);
