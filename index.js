@@ -18,10 +18,11 @@ const identity = require("./src/core/identity");
 const workspaces = require("./src/core/workspaces");
 const authorization = require("./src/core/authorization");
 const platformAdmin = require("./src/core/platformAdmin");
-const { requireAuthentication, requirePlatformAdminAfterAuthentication } = require("./src/core/platformAdmin/middleware");
 const moduleRegistry = require("./src/core/moduleRegistry");
 const wallet = require("./src/modules/wallet");
 const foodMomentRoutes = require("./src/modules/foodMoments/routes");
+const shoppingRoutes = require("./src/modules/shopping/routes");
+const analyticsRoutes = require("./src/modules/analytics/routes");
 
 
 const normalizeGermanText = ingredients.normalizeGermanText;
@@ -313,6 +314,8 @@ app.use("/platform-admin", platformAdmin.routes);
 app.use("/platform", moduleRegistry.routes);
 app.use("/wallet", wallet.routes);
 app.use("/food-moments", foodMomentRoutes);
+app.use(shoppingRoutes);
+app.use("/analytics", analyticsRoutes);
 
 
 app.get("/food-items/resolve", async (req, res) => {
