@@ -43,25 +43,18 @@ function normalizeIngredientLinks(value) {
 
 function validateRecipePayload(payload, { allowEmptyPortions = false } = {}) {
     const name = typeof payload.name === "string" ? payload.name.trim() : "";
-    const calories = toPositiveInteger(payload.calories);
-    const portions = payload.portions === "" || payload.portions === null || payload.portions === undefined
-        ? null
-        : toPositiveInteger(payload.portions);
+    const calories = payload.calories === "" || payload.calories === null || payload.calories === undefined ? 0 : (toPositiveInteger(payload.calories) || 0);
+    const portions = payload.portions === "" || payload.portions === null || payload.portions === undefined ? null : toPositiveInteger(payload.portions);
     const mealTypes = Array.isArray(payload.mealTypes) ? payload.mealTypes : [];
+    const ingredients = typeof payload.ingredients === "string" ? payload.ingredients : "";
+    const instructions = typeof payload.instructions === "string" ? payload.instructions : "";
 
     if (!name) return { error: "Name ist erforderlich." };
-    if (!calories) return { error: "Kalorien müssen als ganze Zahl größer 0 angegeben werden." };
     if (!allowEmptyPortions && !portions) return { error: "Portionen müssen als ganze Zahl größer 0 angegeben werden." };
-    if (mealTypes.length === 0 && payload.mealTypes !== undefined) return { error: "Mindestens eine Mahlzeit muss ausgewählt werden." };
+    if (!ingredients.trim()) return { error: "Zutaten sind erforderlich." };
+    if (!instructions.trim()) return { error: "Anleitung ist erforderlich." };
 
-    return {
-        value: {
-            name,
-            calories,
-            portions,
-            mealTypes,
-            ingredients: typeof payload.ingredients === "string" ? payload.ingredients : "",
-            instructions: typeof payload.instructions === "string" ? payload.instructions : "",
+    return { value: { name, calories, portions, mealTypes, ingredients, instructions,
             is_favorite: Number(payload.is_favorite) === 1 ? 1 : 0,
             ingredientLinks: normalizeIngredientLinks(payload.ingredientLinks)
         }
