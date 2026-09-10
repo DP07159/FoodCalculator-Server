@@ -1,11 +1,12 @@
-Food Moment Platform – Server Delta 2026-09-10
+Food Moment – Debug/UX Fixes R2 – Server Delta – 10.09.2026
 
-Dieses Paket enthält nur geänderte Server-Dateien. Dateien im Zielprojekt mit gleichem Pfad ersetzen.
+Diese ZIP enthält nur die geänderte Serverdatei. Datei am identischen Pfad ersetzen:
+src/modules/foodMoments/routes.js
 
-Enthaltene Änderungen:
-- Food-Moment-Link-Synchronisation aktualisiert nur den tatsächlich gesendeten Link-Typ
-- neuer Endpoint POST /shopping-list/import/week
-- Wochenplan->Einkauf ist idempotent/synchronisierend statt additiv
-- Einkaufslistenquellen liefern Rezept-/Food-Moment-Referenzen für klickbare Herkunft
+Neu:
+- atomare PUT-Route /food-moments/recipe/:recipeId/links
+- synchronisiert Rezept↔große-Food-Moment-Verknüpfungen zuverlässig
+- schließt recipe/planning_slot-Moments als Ziel aus
 
-Keine Datenbankdatei und keine neue Migration erforderlich.
+Keine Datenbankmigration erforderlich.
+Server nach Deployment neu starten.

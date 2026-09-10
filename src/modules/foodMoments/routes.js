@@ -195,6 +195,30 @@ router.get("/recipe/:recipeId", async (req, res, next) => {
         res.json(await Promise.all(rows.map(r => hydrate(r, req.workspaceId))));
     } catch (e) { next(e); }
 });
+router.put("/recipe/:recipeId/links", async (req, res, next) => {
+    try {
+        const recipeId = intOrNull(req.params.recipeId);
+        if (!recipeId) return res.status(400).json({ error: "Ungültige Rezept-ID." });
+        const recipe = await get(`SELECT r.id FROM recipes r WHERE r.id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) LIMIT 1`, [recipeId, req.workspaceId, req.workspaceId]);
+        if (!recipe) return res.status(404).json({ error: "Rezept nicht gefunden." });
+        const requested = uniqueStrings(req.body?.food_moment_public_ids);
+        const availableRows = await all(`SELECT DISTINCT fm.* FROM food_moments fm LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE (fm.workspace_id=? OR a.workspace_id=?) AND COALESCE(fm.source_code,'manual') NOT IN ('recipe','planning_slot') ORDER BY CASE WHEN fm.starts_at IS NULL THEN 1 ELSE 0 END, fm.starts_at ASC, fm.created_at DESC`, [req.workspaceId, req.workspaceId]);
+        const byPublic = new Map(availableRows.map(row => [row.public_id, row]));
+        if (requested.some(id => !byPublic.has(id))) return res.status(400).json({ error: "Mindestens ein ausgewählter Food Moment ist nicht verknüpfbar." });
+        await run('BEGIN');
+        try {
+            const visibleIds = availableRows.map(r => Number(r.id));
+            if (visibleIds.length) await run(`DELETE FROM food_moment_recipe_links WHERE recipe_id=? AND food_moment_id IN (${visibleIds.map(()=>'?').join(',')})`, [recipeId, ...visibleIds]);
+            for (const publicIdValue of requested) await run(`INSERT OR IGNORE INTO food_moment_recipe_links(food_moment_id,recipe_id) VALUES(?,?)`, [byPublic.get(publicIdValue).id, recipeId]);
+            await run('COMMIT');
+        } catch (error) { await run('ROLLBACK').catch(()=>{}); throw error; }
+        const linkedRows = requested.map(id => byPublic.get(id)).filter(Boolean);
+        res.json({
+            food_moments: await Promise.all(linkedRows.map(r => hydrate(r, req.workspaceId))),
+            available_food_moments: await Promise.all(availableRows.map(r => hydrate(r, req.workspaceId)))
+        });
+    } catch (e) { next(e); }
+});
 router.get("/:publicId", async (req, res, next) => { try { const row = await visibleMoment(req.params.publicId, req.workspaceId); if (!row) return res.status(404).json({ error: "Food Moment nicht gefunden." }); res.json(await hydrate(row, req.workspaceId)); } catch (e) { next(e); } });
 router.post("/", async (req, res, next) => { try { const result = await createMoment(req.body || {}, req.workspaceId, req.auth.user.id); if (result.error) return res.status(400).json({ error: result.error }); res.status(201).json(result.value); } catch (e) { next(e); } });
 router.post("/:publicId/repeat", async (req, res, next) => {
