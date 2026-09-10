@@ -151,7 +151,11 @@ async function listFoodMomentLinksForItem(walletItemId, workspaceId) {
 async function addFoodMomentLink({walletItemId, foodMomentId}) { return run(`INSERT OR IGNORE INTO food_moment_wallet_links (food_moment_id, wallet_item_id) VALUES (?, ?)`,[foodMomentId,walletItemId]); }
 async function removeFoodMomentLink(walletItemId, foodMomentId) { return run(`DELETE FROM food_moment_wallet_links WHERE wallet_item_id = ? AND food_moment_id = ?`,[walletItemId,foodMomentId]); }
 
-module.exports = {
+
+async function findAccessibleByPublicIdForUser(publicId, userId) {
+    return get(`SELECT wi.* FROM wallet_items wi WHERE wi.public_id=? AND EXISTS (SELECT 1 FROM wallet_workspace_assignments wwa JOIN workspace_memberships wm ON wm.workspace_id=wwa.workspace_id WHERE wwa.wallet_item_id=wi.id AND wm.user_id=? AND wm.status='active') LIMIT 1`, [publicId, userId]);
+}
+module.exports = { findAccessibleByPublicIdForUser,
     listItems,
     findByPublicId,
     findOwnedByPublicId,

@@ -1,12 +1,15 @@
-Food Moment – Debug/UX Fixes R2 – Server Delta – 10.09.2026
+Food Moment Platform – Debug/Visual Fix R3 – Server Delta – 2026-09-10
 
-Diese ZIP enthält nur die geänderte Serverdatei. Datei am identischen Pfad ersetzen:
-src/modules/foodMoments/routes.js
+Replace the files at the same relative paths in the server deployment.
+Changed files:
+- src/modules/foodMoments/routes.js
+- src/modules/wallet/repository.js
+- src/modules/wallet/workspaceAssignmentService.js
 
-Neu:
-- atomare PUT-Route /food-moments/recipe/:recipeId/links
-- synchronisiert Rezept↔große-Food-Moment-Verknüpfungen zuverlässig
-- schließt recipe/planning_slot-Moments als Ziel aus
+Includes:
+- transactional, verified Recipe ↔ Food Moment linking
+- non-owner users can save a shared-workspace inspiration into their own personal workspace
+- existing owner workspace-management behavior remains intact
 
-Keine Datenbankmigration erforderlich.
-Server nach Deployment neu starten.
+No database migration is required.
+Deploy together with the matching R3 frontend delta.
