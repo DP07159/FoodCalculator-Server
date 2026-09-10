@@ -99,13 +99,18 @@ async function hydrate(row, workspaceId) {
     return { ...row, is_all_day: Number(row.is_all_day) === 1, recipes, inspirations, workspace, workspace_assignments: assignments, repeated_from: repeatedFrom || null, parent_food_moments: parentRows, child_food_moments: childRows, is_component: parentRows.length > 0 };
 }
 async function syncLinks(momentId, body, workspaceId, publicMomentId, userId) {
+    const hasRecipes = Object.prototype.hasOwnProperty.call(body, "recipe_ids") || Object.prototype.hasOwnProperty.call(body, "recipe_id");
+    const hasWallet = Object.prototype.hasOwnProperty.call(body, "wallet_public_ids") || Object.prototype.hasOwnProperty.call(body, "wallet_public_id");
     const recipeIds = uniqueInts(body.recipe_ids ?? (body.recipe_id ? [body.recipe_id] : []));
     const walletIds = uniqueStrings(body.wallet_public_ids ?? (body.wallet_public_id ? [body.wallet_public_id] : []));
+    if (hasRecipes) {
     await run(`DELETE FROM food_moment_recipe_links WHERE food_moment_id=?`, [momentId]);
     for (const rid of recipeIds) {
         const r = await get(`SELECT r.id FROM recipes r WHERE r.id=? AND (r.workspace_id=? OR EXISTS(SELECT 1 FROM recipe_workspace_assignments a WHERE a.recipe_id=r.id AND a.workspace_id=?)) LIMIT 1`, [rid, workspaceId, workspaceId]);
         if (r) await run(`INSERT OR IGNORE INTO food_moment_recipe_links(food_moment_id,recipe_id) VALUES(?,?)`, [momentId, r.id]);
     }
+    }
+    if (hasWallet) {
     await run(`DELETE FROM food_moment_wallet_links WHERE food_moment_id=?`, [momentId]);
     await run(`DELETE FROM wallet_item_relations WHERE target_type='food_moment' AND target_reference=?`, [publicMomentId]);
     for (const wid of walletIds) {
@@ -114,6 +119,7 @@ async function syncLinks(momentId, body, workspaceId, publicMomentId, userId) {
             await run(`INSERT OR IGNORE INTO food_moment_wallet_links(food_moment_id,wallet_item_id) VALUES(?,?)`, [momentId, w.id]);
             await run(`INSERT OR IGNORE INTO wallet_item_relations(wallet_item_id,target_type,target_reference,created_by_user_id) VALUES(?,'food_moment',?,?)`, [w.id, publicMomentId, userId]);
         }
+    }
     }
 }
 async function syncComposition(momentId, body, workspaceId) {

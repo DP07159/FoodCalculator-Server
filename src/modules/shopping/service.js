@@ -64,7 +64,8 @@ function aggregateRows(rows) {
             reference: row.source_reference,
             label: row.source_label || (row.source_type === "manual" ? "Manuell" : "Quelle"),
             recipe_id: row.recipe_id || null,
-            food_moment_id: row.food_moment_id || null
+            food_moment_id: row.food_moment_id || null,
+            food_moment_public_id: row.food_moment_public_id || null
         });
     }
     return [...groups.values()].map(group => ({
@@ -75,7 +76,7 @@ function aggregateRows(rows) {
 }
 
 async function getList(workspaceId) {
-    const rows = await all(`SELECT * FROM shopping_list_entries WHERE workspace_id=? ORDER BY completed ASC, updated_at DESC, id DESC`, [workspaceId]);
+    const rows = await all(`SELECT sle.*, fm.public_id AS food_moment_public_id FROM shopping_list_entries sle LEFT JOIN food_moments fm ON fm.id=sle.food_moment_id WHERE sle.workspace_id=? ORDER BY sle.completed ASC, sle.updated_at DESC, sle.id DESC`, [workspaceId]);
     const aggregated = aggregateRows(rows);
     return {
         active: aggregated.filter(item => !item.completed),
@@ -147,6 +148,20 @@ async function importFoodMoment(publicId, workspaceId, userId) {
     return { value: { added: count, list: await getList(workspaceId) } };
 }
 
+async function importWeek(startDate, workspaceId, userId) {
+    const start = clean(startDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return { error: "Ungültiger Wochenstart." };
+    const startObj = new Date(`${start}T12:00:00`);
+    const endObj = new Date(startObj); endObj.setDate(endObj.getDate()+7);
+    const end = `${endObj.getFullYear()}-${String(endObj.getMonth()+1).padStart(2,'0')}-${String(endObj.getDate()).padStart(2,'0')}`;
+    const prefix = `week:${start}:`;
+    await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type='week_plan' AND source_reference LIKE ?`, [workspaceId, `${prefix}%`]);
+    const rows = await all(`SELECT DISTINCT fm.id AS food_moment_id,fm.public_id,r.* FROM food_moments fm JOIN food_moment_recipe_links l ON l.food_moment_id=fm.id JOIN recipes r ON r.id=l.recipe_id LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE (fm.workspace_id=? OR a.workspace_id=?) AND fm.starts_at>=? AND fm.starts_at<? ORDER BY fm.starts_at,l.id`, [workspaceId,workspaceId,`${start}T00:00:00`,`${end}T00:00:00`]);
+    let count=0;
+    for (const recipe of rows) count += await addRecipeIngredients(recipe,{workspaceId,userId,sourceType:'week_plan',sourceReferencePrefix:sourceKey([prefix,recipe.food_moment_id,'recipe',recipe.id]),sourceLabel:recipe.name,foodMomentId:recipe.food_moment_id});
+    return { value:{added:count,list:await getList(workspaceId)} };
+}
+
 async function setGroupCompleted(body, workspaceId) {
     const canonicalKey = clean(body?.canonical_key);
     const unit = normalizeUnit(body?.unit || "");
@@ -168,4 +183,4 @@ async function clearCompleted(workspaceId) {
     return { removed: Number(result.changes) || 0, list: await getList(workspaceId) };
 }
 
-module.exports = { getList, addManual, importRecipe, importFoodMoment, setGroupCompleted, deleteGroup, clearCompleted };
+module.exports = { getList, addManual, importRecipe, importFoodMoment, importWeek, setGroupCompleted, deleteGroup, clearCompleted };
