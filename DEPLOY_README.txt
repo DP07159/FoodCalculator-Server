@@ -1,15 +1,16 @@
-Food Moment Platform – Debug/Visual Fix R3 – Server Delta – 2026-09-10
+Food Moment Platform – R9 – Recipe Cart Sizing + Shopping Workspace Sharing – Frontend Delta
+Date: 2026-09-11
 
-Replace the files at the same relative paths in the server deployment.
-Changed files:
-- src/modules/foodMoments/routes.js
-- src/modules/wallet/repository.js
-- src/modules/wallet/workspaceAssignmentService.js
+Replace these files at the same relative paths:
+- shopping.html
+- shopping.js
+- style.css
+- service-worker.js
 
-Includes:
-- transactional, verified Recipe ↔ Food Moment linking
-- non-owner users can save a shared-workspace inspiration into their own personal workspace
-- existing owner workspace-management behavior remains intact
+Changes:
+- Recipe shopping-cart control now uses the same large square control size as the neighboring recipe header buttons.
+- Shopping module gets a workspace-share action and shared selection modal.
+- Shopping share UI reuses the existing Spotify-like selection modal language.
+- Service-worker cache bumped to v50-shopping-share.
 
-No database migration is required.
-Deploy together with the matching R3 frontend delta.
+Deploy together with the matching R9 server delta.

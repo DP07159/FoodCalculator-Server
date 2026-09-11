@@ -1,10 +1,21 @@
-const CACHE_NAME = "food-calculator-v26-platform-shell-fix1";
+const CACHE_NAME = "food-moment-platform-v50-shopping-share";
 
 const FILES_TO_CACHE = [
     "/",
     "/index.html",
     "/style.css",
+    "/home.js",
+    "/product-tour.js",
+    "/foodMoments.html",
+    "/foodMoments.js",
+    "/foodMomentCreate.html",
+    "/foodMomentCreate.js",
+    "/foodMoment.html",
+    "/foodMoment.js",
+    "/recipes.html",
+    "/mealPlan.html",
     "/script.js",
+    "/auth-shell.js",
     "/platform.js",
     "/login.html",
     "/login.js",
@@ -18,8 +29,22 @@ const FILES_TO_CACHE = [
     "/admin.html",
     "/adminTable.html",
     "/admin.js",
-    "/inventory.html",
-    "/inventory.js",
+    "/shopping.html",
+    "/shopping.js",
+    "/wallet.html",
+    "/wallet.js",
+    "/assets/entry-illustrations/recipes.png",
+    "/assets/entry-illustrations/moment.png",
+    "/assets/entry-illustrations/capture.png",
+    "/assets/entry-illustrations/planning.png",
+    "/assets/entry-illustrations/shopping.png",
+    "/assets/entry-illustrations/ideas.png",
+    "/favicon.ico",
+    "/favicon-32.png",
+    "/favicon-64.png",
+    "/apple-touch-icon.png",
+    "/icon-192.png",
+    "/icon-512.png",
     "/manifest.json"
 ];
 
