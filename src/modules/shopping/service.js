@@ -91,6 +91,38 @@ async function incomingShareSources(targetWorkspaceId) {
     return all(`SELECT source_workspace_id FROM shopping_list_shares WHERE target_workspace_id=? ORDER BY updated_at DESC,id DESC`, [targetWorkspaceId]);
 }
 
+async function reconcileIncomingCollaborativeList(targetWorkspaceId, userId = null) {
+    const incoming = await incomingShareSources(targetWorkspaceId);
+    if (incoming.length !== 1) return false;
+    const sourceWorkspaceId = Number(incoming[0].source_workspace_id);
+    if (!Number.isFinite(sourceWorkspaceId) || sourceWorkspaceId === Number(targetWorkspaceId)) return false;
+
+    // Rows that were created locally in a receiving workspace by older deployments make
+    // aggregated quantities diverge (local amount + mirrored amount). Once a workspace
+    // participates in exactly one shared list, absorb those rows into the canonical origin
+    // list and remove the local copies. From then on every participant renders the same data.
+    const localRows = await all(`SELECT * FROM shopping_list_entries
+        WHERE workspace_id=? AND source_type<>'workspace_share' ORDER BY id`, [targetWorkspaceId]);
+    if (!localRows.length) return false;
+
+    await run('BEGIN');
+    try {
+        for (const row of localRows) {
+            const result = await run(`INSERT INTO shopping_list_entries
+                (workspace_id,canonical_key,display_name,amount,unit,completed,source_type,source_reference,source_label,recipe_id,food_moment_id,created_by_user_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+                [sourceWorkspaceId,row.canonical_key,row.display_name,row.amount,row.unit||'',Number(row.completed)?1:0,'manual',null,'Gemeinsam hinzugefügt',null,null,userId||row.created_by_user_id||null]);
+        }
+        await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type<>'workspace_share'`, [targetWorkspaceId]);
+        await run('COMMIT');
+    } catch (error) {
+        await run('ROLLBACK').catch(()=>{});
+        throw error;
+    }
+    await syncAllShoppingShares(sourceWorkspaceId, userId);
+    return true;
+}
+
 async function addManual(body, workspaceId, userId) {
     // A workspace that receives exactly one shared shopping list edits that shared list
     // collaboratively. New items therefore belong to the origin list and are mirrored
@@ -390,4 +422,4 @@ async function setShareOptions(sourceWorkspaceId, userId, workspacePublicIds) {
     }
     return { value: await getShareOptions(sourceWorkspaceId, userId) };
 }
-module.exports = { getList, addManual, importRecipe, importFoodMoment, importWeek, setGroupCompleted, deleteGroup, clearCompleted, getShareOptions, setShareOptions, syncAllShoppingShares };
+module.exports = { getList, addManual, importRecipe, importFoodMoment, importWeek, setGroupCompleted, deleteGroup, clearCompleted, getShareOptions, setShareOptions, syncAllShoppingShares, reconcileIncomingCollaborativeList };
