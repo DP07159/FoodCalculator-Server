@@ -201,8 +201,16 @@ async function deleteGroup(body, workspaceId, userId = null) {
     return { value: await getList(workspaceId) };
 }
 
-async function clearCompleted(workspaceId) {
+async function clearCompleted(workspaceId, userId = null) {
+    // If completed rows are shared mirrors, clearing them should clear the corresponding
+    // source entries as well; otherwise they would reappear on the next sync.
+    const sharedRows = await all(`SELECT source_reference FROM shopping_list_entries WHERE workspace_id=? AND completed=1 AND source_type='workspace_share'`, [workspaceId]);
+    const sourceWorkspaceIds = sourceWorkspaceIdsFromSharedRows(sharedRows);
     const result = await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND completed=1`, [workspaceId]);
+    for (const sourceWorkspaceId of sourceWorkspaceIds) {
+        await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND completed=1 AND source_type<>'workspace_share'`, [sourceWorkspaceId]);
+        await syncAllShoppingShares(sourceWorkspaceId, userId);
+    }
     return { removed: Number(result.changes) || 0, list: await getList(workspaceId) };
 }
 
@@ -236,20 +244,20 @@ async function syncSharedListToTarget(sourceWorkspaceId, targetWorkspaceId, user
     const sourceWorkspace = await get(`SELECT name FROM workspaces WHERE id=?`, [sourceWorkspaceId]);
     const sharedLabel = sourceWorkspace?.name ? `Geteilt aus ${sourceWorkspace.name}` : 'Geteilte Einkaufsliste';
     await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type='workspace_share' AND source_reference LIKE ?`, [targetWorkspaceId, `${prefix}%`]);
-    const sourceRows = await all(`SELECT * FROM shopping_list_entries WHERE workspace_id=? AND completed=0 AND source_type<>'workspace_share' ORDER BY id`, [sourceWorkspaceId]);
+    // Keep the complete state in sync, including completed rows. This makes the target
+    // workspace behave exactly like the source workspace: checked items stay visible in
+    // "Schon im Wagen" and can be restored from either side.
+    const sourceRows = await all(`SELECT * FROM shopping_list_entries WHERE workspace_id=? AND source_type<>'workspace_share' ORDER BY id`, [sourceWorkspaceId]);
     for (const row of sourceRows) {
-        await insertEntry({
-            workspaceId: targetWorkspaceId,
-            userId,
-            name: row.display_name,
-            amount: row.amount,
-            unit: row.unit,
-            sourceType: 'workspace_share',
-            sourceReference: `${prefix}${row.id}`,
-            sourceLabel: sharedLabel,
-            recipeId: null,
-            foodMomentId: null
-        });
+        const canonicalKey = canonical(row.display_name);
+        const normalizedUnit = normalizeUnit(row.unit || '');
+        await run(`INSERT INTO shopping_list_entries
+            (workspace_id,canonical_key,display_name,amount,unit,completed,source_type,source_reference,source_label,recipe_id,food_moment_id,created_by_user_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(workspace_id,source_type,source_reference,canonical_key,unit)
+            WHERE source_reference IS NOT NULL
+            DO UPDATE SET display_name=excluded.display_name,amount=excluded.amount,completed=excluded.completed,source_label=excluded.source_label,updated_at=CURRENT_TIMESTAMP`,
+            [targetWorkspaceId, canonicalKey, row.display_name, row.amount, normalizedUnit, Number(row.completed) ? 1 : 0, 'workspace_share', `${prefix}${row.id}`, sharedLabel, null, null, userId]);
     }
     return sourceRows.length;
 }
