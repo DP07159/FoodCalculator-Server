@@ -1,5 +1,6 @@
 const { run, get, all } = require("../../database/database");
 const recipeRepository = require("../recipes/repository");
+const workspaceRepository = require("../../core/workspaces/repository");
 const { parseIngredientsText } = require("../../shared/ingredients/parser");
 const { canonicalizeIngredientName, displayIngredientNameFromCanonical } = require("../../shared/ingredients/canonicalizer");
 const { normalizeIngredientUnit } = require("../../shared/ingredients/units");
@@ -64,7 +65,8 @@ function aggregateRows(rows) {
             reference: row.source_reference,
             label: row.source_label || (row.source_type === "manual" ? "Manuell" : "Quelle"),
             recipe_id: row.recipe_id || null,
-            food_moment_id: row.food_moment_id || null
+            food_moment_id: row.food_moment_id || null,
+            food_moment_public_id: row.food_moment_public_id || null
         });
     }
     return [...groups.values()].map(group => ({
@@ -75,7 +77,7 @@ function aggregateRows(rows) {
 }
 
 async function getList(workspaceId) {
-    const rows = await all(`SELECT * FROM shopping_list_entries WHERE workspace_id=? ORDER BY completed ASC, updated_at DESC, id DESC`, [workspaceId]);
+    const rows = await all(`SELECT sle.*, fm.public_id AS food_moment_public_id FROM shopping_list_entries sle LEFT JOIN food_moments fm ON fm.id=sle.food_moment_id WHERE sle.workspace_id=? ORDER BY sle.completed ASC, sle.updated_at DESC, sle.id DESC`, [workspaceId]);
     const aggregated = aggregateRows(rows);
     return {
         active: aggregated.filter(item => !item.completed),
@@ -147,25 +149,172 @@ async function importFoodMoment(publicId, workspaceId, userId) {
     return { value: { added: count, list: await getList(workspaceId) } };
 }
 
-async function setGroupCompleted(body, workspaceId) {
+async function importWeek(startDate, workspaceId, userId) {
+    const start = clean(startDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return { error: "Ungültiger Wochenstart." };
+    const startObj = new Date(`${start}T12:00:00`);
+    const endObj = new Date(startObj); endObj.setDate(endObj.getDate()+7);
+    const end = `${endObj.getFullYear()}-${String(endObj.getMonth()+1).padStart(2,'0')}-${String(endObj.getDate()).padStart(2,'0')}`;
+    const prefix = `week:${start}:`;
+    await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type='week_plan' AND source_reference LIKE ?`, [workspaceId, `${prefix}%`]);
+    const rows = await all(`SELECT DISTINCT fm.id AS food_moment_id,fm.public_id,r.* FROM food_moments fm JOIN food_moment_recipe_links l ON l.food_moment_id=fm.id JOIN recipes r ON r.id=l.recipe_id LEFT JOIN food_moment_workspace_assignments a ON a.food_moment_id=fm.id WHERE (fm.workspace_id=? OR a.workspace_id=?) AND fm.starts_at>=? AND fm.starts_at<? ORDER BY fm.starts_at,l.id`, [workspaceId,workspaceId,`${start}T00:00:00`,`${end}T00:00:00`]);
+    let count=0;
+    for (const recipe of rows) count += await addRecipeIngredients(recipe,{workspaceId,userId,sourceType:'week_plan',sourceReferencePrefix:sourceKey([prefix,recipe.food_moment_id,'recipe',recipe.id]),sourceLabel:recipe.name,foodMomentId:recipe.food_moment_id});
+    return { value:{added:count,list:await getList(workspaceId)} };
+}
+
+function sourceWorkspaceIdsFromSharedRows(rows) {
+    const ids = new Set();
+    for (const row of rows || []) {
+        const match = String(row.source_reference || '').match(/^workspace-share:(\d+):/);
+        if (match) ids.add(Number(match[1]));
+    }
+    return [...ids].filter(Number.isFinite);
+}
+
+async function setGroupCompleted(body, workspaceId, userId = null) {
     const canonicalKey = clean(body?.canonical_key);
     const unit = normalizeUnit(body?.unit || "");
     if (!canonicalKey) return { error: "Eintrag fehlt." };
-    await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND canonical_key=? AND unit=?`, [body?.completed ? 1 : 0, workspaceId, canonicalKey, unit]);
+    const sharedRows = await all(`SELECT source_reference FROM shopping_list_entries WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type='workspace_share'`, [workspaceId, canonicalKey, unit]);
+    const sourceWorkspaceIds = sourceWorkspaceIdsFromSharedRows(sharedRows);
+    const completed = body?.completed ? 1 : 0;
+    await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND canonical_key=? AND unit=?`, [completed, workspaceId, canonicalKey, unit]);
+    for (const sourceWorkspaceId of sourceWorkspaceIds) {
+        await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type<>'workspace_share'`, [completed, sourceWorkspaceId, canonicalKey, unit]);
+        await syncAllShoppingShares(sourceWorkspaceId, userId);
+    }
     return { value: await getList(workspaceId) };
 }
 
-async function deleteGroup(body, workspaceId) {
+async function deleteGroup(body, workspaceId, userId = null) {
     const canonicalKey = clean(body?.canonical_key);
     const unit = normalizeUnit(body?.unit || "");
     if (!canonicalKey) return { error: "Eintrag fehlt." };
+    const sharedRows = await all(`SELECT source_reference FROM shopping_list_entries WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type='workspace_share'`, [workspaceId, canonicalKey, unit]);
+    const sourceWorkspaceIds = sourceWorkspaceIdsFromSharedRows(sharedRows);
     await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND canonical_key=? AND unit=?`, [workspaceId, canonicalKey, unit]);
+    for (const sourceWorkspaceId of sourceWorkspaceIds) {
+        await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type<>'workspace_share'`, [sourceWorkspaceId, canonicalKey, unit]);
+        await syncAllShoppingShares(sourceWorkspaceId, userId);
+    }
     return { value: await getList(workspaceId) };
 }
 
-async function clearCompleted(workspaceId) {
+async function clearCompleted(workspaceId, userId = null) {
+    // If completed rows are shared mirrors, clearing them should clear the corresponding
+    // source entries as well; otherwise they would reappear on the next sync.
+    const sharedRows = await all(`SELECT source_reference FROM shopping_list_entries WHERE workspace_id=? AND completed=1 AND source_type='workspace_share'`, [workspaceId]);
+    const sourceWorkspaceIds = sourceWorkspaceIdsFromSharedRows(sharedRows);
     const result = await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND completed=1`, [workspaceId]);
+    for (const sourceWorkspaceId of sourceWorkspaceIds) {
+        await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND completed=1 AND source_type<>'workspace_share'`, [sourceWorkspaceId]);
+        await syncAllShoppingShares(sourceWorkspaceId, userId);
+    }
     return { removed: Number(result.changes) || 0, list: await getList(workspaceId) };
 }
 
-module.exports = { getList, addManual, importRecipe, importFoodMoment, setGroupCompleted, deleteGroup, clearCompleted };
+
+
+function sharePrefix(sourceWorkspaceId) { return `workspace-share:${Number(sourceWorkspaceId)}:`; }
+
+let shoppingShareSchemaReady = false;
+async function ensureShoppingShareSchema() {
+    if (shoppingShareSchemaReady) return;
+    await run(`CREATE TABLE IF NOT EXISTS shopping_list_shares (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_workspace_id INTEGER NOT NULL,
+        target_workspace_id INTEGER NOT NULL,
+        shared_by_user_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(source_workspace_id, target_workspace_id),
+        FOREIGN KEY (source_workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (target_workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (shared_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+        CHECK (source_workspace_id <> target_workspace_id)
+    )`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_shopping_list_shares_source ON shopping_list_shares(source_workspace_id, target_workspace_id)`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_shopping_list_shares_target ON shopping_list_shares(target_workspace_id, source_workspace_id)`);
+    shoppingShareSchemaReady = true;
+}
+
+async function syncSharedListToTarget(sourceWorkspaceId, targetWorkspaceId, userId) {
+    const prefix = sharePrefix(sourceWorkspaceId);
+    const sourceWorkspace = await get(`SELECT name FROM workspaces WHERE id=?`, [sourceWorkspaceId]);
+    const sharedLabel = sourceWorkspace?.name ? `Geteilt aus ${sourceWorkspace.name}` : 'Geteilte Einkaufsliste';
+    await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type='workspace_share' AND source_reference LIKE ?`, [targetWorkspaceId, `${prefix}%`]);
+    // Keep the complete state in sync, including completed rows. This makes the target
+    // workspace behave exactly like the source workspace: checked items stay visible in
+    // "Schon im Wagen" and can be restored from either side.
+    const sourceRows = await all(`SELECT * FROM shopping_list_entries WHERE workspace_id=? AND source_type<>'workspace_share' ORDER BY id`, [sourceWorkspaceId]);
+    for (const row of sourceRows) {
+        const canonicalKey = canonical(row.display_name);
+        const normalizedUnit = normalizeUnit(row.unit || '');
+        await run(`INSERT INTO shopping_list_entries
+            (workspace_id,canonical_key,display_name,amount,unit,completed,source_type,source_reference,source_label,recipe_id,food_moment_id,created_by_user_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(workspace_id,source_type,source_reference,canonical_key,unit)
+            WHERE source_reference IS NOT NULL
+            DO UPDATE SET display_name=excluded.display_name,amount=excluded.amount,completed=excluded.completed,source_label=excluded.source_label,updated_at=CURRENT_TIMESTAMP`,
+            [targetWorkspaceId, canonicalKey, row.display_name, row.amount, normalizedUnit, Number(row.completed) ? 1 : 0, 'workspace_share', `${prefix}${row.id}`, sharedLabel, null, null, userId]);
+    }
+    return sourceRows.length;
+}
+
+async function syncAllShoppingShares(sourceWorkspaceId, userId) {
+    await ensureShoppingShareSchema();
+    const shares = await all(`SELECT target_workspace_id FROM shopping_list_shares WHERE source_workspace_id=? ORDER BY id`, [sourceWorkspaceId]);
+    for (const share of shares) await syncSharedListToTarget(sourceWorkspaceId, Number(share.target_workspace_id), userId);
+}
+
+async function getShareOptions(sourceWorkspaceId, userId) {
+    await ensureShoppingShareSchema();
+    const [workspaces, sourceWorkspace, shares] = await Promise.all([
+        workspaceRepository.listActiveWorkspacesForUser(userId),
+        get(`SELECT id,public_id,name,workspace_type FROM workspaces WHERE id=?`, [sourceWorkspaceId]),
+        all(`SELECT target_workspace_id FROM shopping_list_shares WHERE source_workspace_id=?`, [sourceWorkspaceId])
+    ]);
+    const assigned = new Set(shares.map(row => Number(row.target_workspace_id)));
+    const options = workspaces
+        .filter(workspace => Number(workspace.id) !== Number(sourceWorkspaceId))
+        .map(workspace => ({
+            public_id: workspace.public_id,
+            name: workspace.name,
+            workspace_type: workspace.workspace_type,
+            is_owner: Number(workspace.is_owner) === 1,
+            is_assigned: assigned.has(Number(workspace.id))
+        }));
+    return { source_workspace: sourceWorkspace, workspaces: options };
+}
+
+async function setShareOptions(sourceWorkspaceId, userId, workspacePublicIds) {
+    await ensureShoppingShareSchema();
+    const selected = [...new Set((Array.isArray(workspacePublicIds) ? workspacePublicIds : []).map(value => String(value || '').trim()).filter(Boolean))];
+    const eligible = (await workspaceRepository.listActiveWorkspacesForUser(userId)).filter(workspace => Number(workspace.id) !== Number(sourceWorkspaceId));
+    const byPublicId = new Map(eligible.map(workspace => [workspace.public_id, workspace]));
+    const invalid = selected.filter(publicId => !byPublicId.has(publicId));
+    if (invalid.length) return { forbidden: true, error: 'Ein oder mehrere ausgewählte Workspaces stehen dir nicht zur Verfügung.' };
+    const selectedIds = new Set(selected.map(publicId => Number(byPublicId.get(publicId).id)));
+    await run('BEGIN');
+    try {
+        const existing = await all(`SELECT target_workspace_id FROM shopping_list_shares WHERE source_workspace_id=?`, [sourceWorkspaceId]);
+        const existingIds = new Set(existing.map(row => Number(row.target_workspace_id)));
+        for (const workspace of eligible) {
+            const targetId = Number(workspace.id);
+            if (selectedIds.has(targetId)) {
+                await run(`INSERT INTO shopping_list_shares(source_workspace_id,target_workspace_id,shared_by_user_id,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(source_workspace_id,target_workspace_id) DO UPDATE SET shared_by_user_id=excluded.shared_by_user_id,updated_at=CURRENT_TIMESTAMP`, [sourceWorkspaceId,targetId,userId]);
+                await syncSharedListToTarget(sourceWorkspaceId,targetId,userId);
+            } else if (existingIds.has(targetId)) {
+                await run(`DELETE FROM shopping_list_shares WHERE source_workspace_id=? AND target_workspace_id=?`, [sourceWorkspaceId,targetId]);
+                await run(`DELETE FROM shopping_list_entries WHERE workspace_id=? AND source_type='workspace_share' AND source_reference LIKE ?`, [targetId, `${sharePrefix(sourceWorkspaceId)}%`]);
+            }
+        }
+        await run('COMMIT');
+    } catch (error) {
+        await run('ROLLBACK').catch(()=>{});
+        throw error;
+    }
+    return { value: await getShareOptions(sourceWorkspaceId, userId) };
+}
+module.exports = { getList, addManual, importRecipe, importFoodMoment, importWeek, setGroupCompleted, deleteGroup, clearCompleted, getShareOptions, setShareOptions, syncAllShoppingShares };
