@@ -1,15 +1,14 @@
-Food Moment Platform – Shopping Share Completed-State Fix R12 – Server Delta – 2026-09-11
+Food Moment Platform – Shopping Share R14 – Collaborative additions – 2026-09-11
 
-Deploy this delta on top of the current R11 server.
+Server-only hotfix based on R13.
 
-Changed files:
+Changed:
 - src/modules/shopping/service.js
-- src/modules/shopping/routes.js
 
-Fixes:
-- completed shared shopping items are mirrored into target workspaces instead of disappearing
-- "Schon im Wagen" now behaves the same in source and shared workspaces
-- restoring a completed item from either workspace is synchronized to all linked workspaces
-- clearing completed items in a shared workspace also clears the corresponding source entries, preventing them from reappearing on the next sync
+Behavior:
+- If a workspace receives exactly one shared shopping list, newly added manual items are written to the origin workspace and then mirrored back to all participating target workspaces.
+- This also makes amount changes performed by adding/adjusting the same shopping item through the existing add flow visible in the origin list.
+- Origin-workspace additions continue to work as before and are mirrored to all shared workspaces.
+- If a workspace receives multiple different shared lists, additions remain local to avoid silently assigning an item to the wrong origin list.
 
-No database migration is required.
+No migration required.

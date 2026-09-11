@@ -86,7 +86,30 @@ async function getList(workspaceId) {
     };
 }
 
+async function incomingShareSources(targetWorkspaceId) {
+    await ensureShoppingShareSchema();
+    return all(`SELECT source_workspace_id FROM shopping_list_shares WHERE target_workspace_id=? ORDER BY updated_at DESC,id DESC`, [targetWorkspaceId]);
+}
+
 async function addManual(body, workspaceId, userId) {
+    // A workspace that receives exactly one shared shopping list edits that shared list
+    // collaboratively. New items therefore belong to the origin list and are mirrored
+    // back to every participant instead of becoming a target-only local row.
+    const incoming = await incomingShareSources(workspaceId);
+    if (incoming.length === 1) {
+        const sourceWorkspaceId = Number(incoming[0].source_workspace_id);
+        const result = await insertEntry({
+            workspaceId: sourceWorkspaceId,
+            userId,
+            name: body?.name,
+            amount: body?.amount,
+            unit: body?.unit,
+            sourceType: "manual"
+        });
+        if (result.error) return result;
+        await syncAllShoppingShares(sourceWorkspaceId, userId);
+        return { value: true, collaborative_source_workspace_id: sourceWorkspaceId };
+    }
     return insertEntry({ workspaceId, userId, name: body?.name, amount: body?.amount, unit: body?.unit, sourceType: "manual" });
 }
 
@@ -163,27 +186,77 @@ async function importWeek(startDate, workspaceId, userId) {
     return { value:{added:count,list:await getList(workspaceId)} };
 }
 
+function parseSharedSourceReference(value) {
+    const match = String(value || '').match(/^workspace-share:(\d+):(\d+)$/);
+    if (!match) return null;
+    const sourceWorkspaceId = Number(match[1]);
+    const sourceEntryId = Number(match[2]);
+    if (!Number.isFinite(sourceWorkspaceId) || !Number.isFinite(sourceEntryId)) return null;
+    return { sourceWorkspaceId, sourceEntryId };
+}
+
 function sourceWorkspaceIdsFromSharedRows(rows) {
     const ids = new Set();
     for (const row of rows || []) {
-        const match = String(row.source_reference || '').match(/^workspace-share:(\d+):/);
-        if (match) ids.add(Number(match[1]));
+        const ref = parseSharedSourceReference(row.source_reference);
+        if (ref) ids.add(ref.sourceWorkspaceId);
     }
-    return [...ids].filter(Number.isFinite);
+    return [...ids];
+}
+
+async function mirrorCompletionForSourceEntries(sourceWorkspaceId, sourceEntryIds, completed) {
+    const ids = [...new Set((sourceEntryIds || []).map(Number).filter(Number.isFinite))];
+    if (!ids.length) return;
+    const refs = ids.map(id => `${sharePrefix(sourceWorkspaceId)}${id}`);
+    const placeholders = refs.map(() => '?').join(',');
+    await run(`UPDATE shopping_list_entries
+        SET completed=?, updated_at=CURRENT_TIMESTAMP
+        WHERE source_type='workspace_share' AND source_reference IN (${placeholders})`,
+        [completed ? 1 : 0, ...refs]);
 }
 
 async function setGroupCompleted(body, workspaceId, userId = null) {
     const canonicalKey = clean(body?.canonical_key);
     const unit = normalizeUnit(body?.unit || "");
     if (!canonicalKey) return { error: "Eintrag fehlt." };
-    const sharedRows = await all(`SELECT source_reference FROM shopping_list_entries WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type='workspace_share'`, [workspaceId, canonicalKey, unit]);
-    const sourceWorkspaceIds = sourceWorkspaceIdsFromSharedRows(sharedRows);
     const completed = body?.completed ? 1 : 0;
-    await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND canonical_key=? AND unit=?`, [completed, workspaceId, canonicalKey, unit]);
-    for (const sourceWorkspaceId of sourceWorkspaceIds) {
-        await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP WHERE workspace_id=? AND canonical_key=? AND unit=? AND source_type<>'workspace_share'`, [completed, sourceWorkspaceId, canonicalKey, unit]);
-        await syncAllShoppingShares(sourceWorkspaceId, userId);
+
+    // Capture the rows before changing anything. In a receiving workspace, a group can
+    // contain shared mirrors and local rows at the same time.
+    const rows = await all(`SELECT id,source_type,source_reference FROM shopping_list_entries
+        WHERE workspace_id=? AND canonical_key=? AND unit=? ORDER BY id`,
+        [workspaceId, canonicalKey, unit]);
+
+    await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP
+        WHERE workspace_id=? AND canonical_key=? AND unit=?`,
+        [completed, workspaceId, canonicalKey, unit]);
+
+    // A click in a shared workspace must update the exact origin rows represented by the
+    // mirror entries. We deliberately do NOT delete/recreate the mirror rows here; that
+    // caused checked items to disappear from the receiving workspace in some deployments.
+    const originGroups = new Map();
+    for (const row of rows) {
+        if (row.source_type !== 'workspace_share') continue;
+        const ref = parseSharedSourceReference(row.source_reference);
+        if (!ref) continue;
+        if (!originGroups.has(ref.sourceWorkspaceId)) originGroups.set(ref.sourceWorkspaceId, []);
+        originGroups.get(ref.sourceWorkspaceId).push(ref.sourceEntryId);
     }
+    for (const [sourceWorkspaceId, sourceEntryIds] of originGroups) {
+        const ids = [...new Set(sourceEntryIds)];
+        const placeholders = ids.map(() => '?').join(',');
+        await run(`UPDATE shopping_list_entries SET completed=?,updated_at=CURRENT_TIMESTAMP
+            WHERE workspace_id=? AND id IN (${placeholders}) AND source_type<>'workspace_share'`,
+            [completed, sourceWorkspaceId, ...ids]);
+        await mirrorCompletionForSourceEntries(sourceWorkspaceId, ids, completed);
+    }
+
+    // A click in an origin workspace has no workspace_share row to inspect. Mirror the
+    // exact local source rows to every receiving workspace in place, preserving the item
+    // so it moves to/from "Schon im Wagen" instead of disappearing.
+    const localSourceIds = rows.filter(row => row.source_type !== 'workspace_share').map(row => Number(row.id)).filter(Number.isFinite);
+    if (localSourceIds.length) await mirrorCompletionForSourceEntries(workspaceId, localSourceIds, completed);
+
     return { value: await getList(workspaceId) };
 }
 
