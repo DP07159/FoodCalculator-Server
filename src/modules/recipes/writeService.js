@@ -21,7 +21,7 @@ function normalizeRecipeRow(recipe) {
         mealTypes: parseMealTypes(recipe.mealTypes),
         ingredients: recipe.ingredients || "",
         instructions: recipe.instructions || "",
-        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
+        is_favorite: Number(recipe.workspace_is_favorite ?? recipe.is_favorite) === 1 ? 1 : 0
     };
 }
 
@@ -121,8 +121,17 @@ async function createRecipe(payload, workspaceId, ownerUserId) {
             ingredients, instructions, is_favorite, visibility, version, created_at, updated_at
          )
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'workspace', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [workspaceId, ownerUserId, recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, recipe.is_favorite]
+        [workspaceId, ownerUserId, recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, 0]
     );
+
+    if (Number(recipe.is_favorite) === 1) {
+        await run(
+            `INSERT INTO recipe_workspace_favorites (recipe_id, workspace_id, is_favorite, created_at, updated_at)
+             VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(recipe_id, workspace_id) DO UPDATE SET is_favorite = 1, updated_at = CURRENT_TIMESTAMP`,
+            [result.lastID, workspaceId]
+        );
+    }
 
     await run(
         `INSERT INTO recipe_workspace_assignments (
@@ -137,10 +146,12 @@ async function createRecipe(payload, workspaceId, ownerUserId) {
     );
 
     const created = await get(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
          INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
          WHERE r.id = ?
            AND rwa.workspace_id = ?
          LIMIT 1`,
@@ -152,10 +163,12 @@ async function createRecipe(payload, workspaceId, ownerUserId) {
 
 async function updateRecipe(recipeId, payload, workspaceId) {
     const current = await get(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
          INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
          WHERE r.id = ?
            AND rwa.workspace_id = ?
          LIMIT 1`,
@@ -171,23 +184,38 @@ async function updateRecipe(recipeId, payload, workspaceId) {
     const recipe = validation.value;
 
     const favoriteValue = payload.is_favorite === undefined
-        ? Number(current.is_favorite) || 0
+        ? Number(current.workspace_is_favorite ?? current.is_favorite) || 0
         : recipe.is_favorite;
 
     await run(
         `UPDATE recipes
-         SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?, is_favorite = ?,
+         SET name = ?, calories = ?, portions = ?, mealTypes = ?, ingredients = ?, instructions = ?,
              version = COALESCE(version, 1) + 1,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, favoriteValue, recipeId]
+        [recipe.name, recipe.calories, recipe.portions, JSON.stringify(recipe.mealTypes), recipe.ingredients, recipe.instructions, recipeId]
     );
 
+    if (payload.is_favorite !== undefined) {
+        if (favoriteValue === 1) {
+            await run(
+                `INSERT INTO recipe_workspace_favorites (recipe_id, workspace_id, is_favorite, created_at, updated_at)
+                 VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(recipe_id, workspace_id) DO UPDATE SET is_favorite = 1, updated_at = CURRENT_TIMESTAMP`,
+                [recipeId, workspaceId]
+            );
+        } else {
+            await run(`DELETE FROM recipe_workspace_favorites WHERE recipe_id = ? AND workspace_id = ?`, [recipeId, workspaceId]);
+        }
+    }
+
     const updated = await get(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
          INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
          WHERE r.id = ?
            AND rwa.workspace_id = ?
          LIMIT 1`,

@@ -16,23 +16,27 @@ function workspaceVisibilityWhere(alias = "r") {
 
 async function findAll(workspaceId) {
     return all(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = ?
          WHERE ${workspaceVisibilityWhere("r")}
            AND r.visibility <> 'archived'
          ORDER BY r.name COLLATE NOCASE ASC`,
-        [workspaceId, workspaceId]
+        [workspaceId, workspaceId, workspaceId]
     );
 }
 
 async function findById(recipeId, workspaceId) {
     return get(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = ?
          WHERE r.id = ?
            AND ${workspaceVisibilityWhere("r")}
          LIMIT 1`,
-        [recipeId, workspaceId, workspaceId]
+        [workspaceId, recipeId, workspaceId, workspaceId]
     );
 }
 
@@ -63,7 +67,7 @@ async function create(recipe, workspaceId, ownerUserId) {
             JSON.stringify(recipe.mealTypes),
             recipe.ingredients,
             recipe.instructions,
-            recipe.is_favorite
+            0
         ]
     );
 
@@ -72,6 +76,10 @@ async function create(recipe, workspaceId, ownerUserId) {
         workspaceId,
         assignedByUserId: ownerUserId
     });
+
+    if (Number(recipe.is_favorite) === 1) {
+        await updateFavorite(result.lastID, 1, workspaceId);
+    }
 
     return findById(result.lastID, workspaceId);
 }
@@ -89,7 +97,6 @@ async function update(recipeId, recipe, workspaceId) {
             mealTypes = ?,
             ingredients = ?,
             instructions = ?,
-            is_favorite = ?,
             version = COALESCE(version, 1) + 1,
             updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
@@ -100,7 +107,6 @@ async function update(recipeId, recipe, workspaceId) {
             JSON.stringify(recipe.mealTypes),
             recipe.ingredients,
             recipe.instructions,
-            recipe.is_favorite,
             recipeId
         ]
     );
@@ -112,14 +118,22 @@ async function updateFavorite(recipeId, isFavorite, workspaceId) {
     const visible = await findById(recipeId, workspaceId);
     if (!visible) return { changes: 0 };
 
-    return run(
-        `UPDATE recipes
-         SET is_favorite = ?,
-             version = COALESCE(version, 1) + 1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [isFavorite, recipeId]
-    );
+    if (Number(isFavorite) === 1) {
+        await run(
+            `INSERT INTO recipe_workspace_favorites (recipe_id, workspace_id, is_favorite, created_at, updated_at)
+             VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(recipe_id, workspace_id)
+             DO UPDATE SET is_favorite = 1, updated_at = CURRENT_TIMESTAMP`,
+            [recipeId, workspaceId]
+        );
+    } else {
+        await run(
+            `DELETE FROM recipe_workspace_favorites WHERE recipe_id = ? AND workspace_id = ?`,
+            [recipeId, workspaceId]
+        );
+    }
+
+    return { changes: 1 };
 }
 
 async function deleteIngredients(recipeId) {
@@ -197,6 +211,12 @@ async function addWorkspaceAssignment({
 }
 
 async function removeWorkspaceAssignment(recipeId, workspaceId) {
+    await run(
+        `DELETE FROM recipe_workspace_favorites
+         WHERE recipe_id = ?
+           AND workspace_id = ?`,
+        [recipeId, workspaceId]
+    );
     return run(
         `DELETE FROM recipe_workspace_assignments
          WHERE recipe_id = ?

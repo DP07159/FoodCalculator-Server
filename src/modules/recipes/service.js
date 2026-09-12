@@ -102,17 +102,19 @@ async function updateRecipe(recipeId, payload, workspaceId) {
 
     const favoriteValue =
         payload.is_favorite === undefined
-            ? Number(current.is_favorite) || 0
+            ? Number(current.workspace_is_favorite ?? current.is_favorite) || 0
             : validation.value.is_favorite;
 
-    const updated = await recipeRepository.update(
+    let updated = await recipeRepository.update(
         recipeId,
-        {
-            ...validation.value,
-            is_favorite: favoriteValue
-        },
+        validation.value,
         workspaceId
     );
+
+    if (payload.is_favorite !== undefined) {
+        await recipeRepository.updateFavorite(recipeId, favoriteValue, workspaceId);
+        updated = await recipeRepository.findById(recipeId, workspaceId);
+    }
 
     const ingredientsChanged =
         normalizeIngredientsTextForChangeCheck(

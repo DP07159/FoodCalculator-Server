@@ -32,7 +32,7 @@ function normalizeRecipeRow(recipe) {
         mealTypes: parseMealTypes(recipe.mealTypes),
         ingredients: recipe.ingredients || "",
         instructions: recipe.instructions || "",
-        is_favorite: Number(recipe.is_favorite) === 1 ? 1 : 0
+        is_favorite: Number(recipe.workspace_is_favorite ?? recipe.is_favorite) === 1 ? 1 : 0
     };
 }
 
@@ -175,6 +175,7 @@ async function getRecipesByFoodItem(foodItemId, workspaceId) {
     const rows = await all(`
         SELECT
             r.*,
+            COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite,
             ri.id AS ingredient_link_id,
             ri.raw_text AS ingredient_raw_text,
             ri.food_name AS ingredient_food_name,
@@ -185,6 +186,8 @@ async function getRecipesByFoodItem(foodItemId, workspaceId) {
         INNER JOIN recipes r ON r.id = ri.recipe_id
         INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+        LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
         WHERE ri.food_item_id = ?
           AND rwa.workspace_id = ?
           AND r.visibility <> 'archived'
@@ -219,10 +222,12 @@ async function getRecipesByIngredient(name, workspaceId) {
     if (!ingredientName) return { error: "Lebensmittelname ist erforderlich.", status: 400 };
 
     const recipes = await all(
-        `SELECT DISTINCT r.*
+        `SELECT DISTINCT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
          INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
          WHERE rwa.workspace_id = ?
            AND r.visibility <> 'archived'
          ORDER BY r.name COLLATE NOCASE ASC`,
@@ -249,10 +254,12 @@ async function getRecipesByIngredient(name, workspaceId) {
 
 async function getRecipeStockCheck(recipeId, portions, workspaceId) {
     const recipe = await get(
-        `SELECT r.*
+        `SELECT r.*, COALESCE(rwf.is_favorite, 0) AS workspace_is_favorite
          FROM recipes r
          INNER JOIN recipe_workspace_assignments rwa
             ON rwa.recipe_id = r.id
+         LEFT JOIN recipe_workspace_favorites rwf
+            ON rwf.recipe_id = r.id AND rwf.workspace_id = rwa.workspace_id
          WHERE r.id = ?
            AND rwa.workspace_id = ?
          LIMIT 1`,

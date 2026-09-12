@@ -145,6 +145,11 @@ async function removePlatformAssignment(recipeId, workspaceId) {
     if (!grant) return { removed: false };
 
     await run(
+        `DELETE FROM recipe_workspace_favorites
+         WHERE recipe_id = ? AND workspace_id = ?`,
+        [recipeId, workspaceId]
+    );
+    await run(
         `DELETE FROM recipe_workspace_assignments
          WHERE recipe_id = ? AND workspace_id = ?`,
         [recipeId, workspaceId]
