@@ -11,19 +11,22 @@ async function ensurePersonalWorkspaceForUser(user, options = {}) {
     let workspace = await repository.findPersonalWorkspaceByOwnerUserId(user.id);
     let created = false;
 
-    if (!workspace) {
-        const name = normalizeWorkspaceName(
-            options.name || process.env.DEFAULT_PERSONAL_WORKSPACE_NAME || "Persönlicher Workspace"
-        );
+    const personalName = String(user.display_name || "").trim();
+    if (!personalName) {
+        throw new Error("Benutzername ist für einen persönlichen Workspace erforderlich.");
+    }
 
+    if (!workspace) {
         workspace = await repository.createWorkspace({
             publicId: crypto.randomUUID(),
-            name,
+            name: personalName,
             workspaceType: "personal",
             ownerUserId: user.id
         });
 
         created = true;
+    } else if (workspace.name !== personalName) {
+        workspace = await repository.updateWorkspaceName(workspace.id, personalName);
     }
 
     const membership = await repository.createMembership({
@@ -35,6 +38,45 @@ async function ensurePersonalWorkspaceForUser(user, options = {}) {
 
     return {
         created,
+        workspace: mapWorkspace({
+            ...workspace,
+            membership_status: membership.status,
+            is_owner: membership.is_owner
+        }),
+        membership: mapMembership(membership)
+    };
+}
+
+async function createOwnedWorkspaceForUser(user, options = {}) {
+    if (!user?.id) {
+        throw new Error("Benutzer ist erforderlich.");
+    }
+
+    const name = normalizeWorkspaceName(options.name);
+    if (!name) {
+        throw new Error("Workspace-Name ist erforderlich.");
+    }
+
+    const workspaceType = String(options.workspaceType || "family").trim().toLowerCase();
+    if (!["family", "practice", "restaurant", "organization"].includes(workspaceType)) {
+        throw new Error("Workspace-Typ ist ungültig.");
+    }
+
+    const workspace = await repository.createWorkspace({
+        publicId: crypto.randomUUID(),
+        name,
+        workspaceType,
+        ownerUserId: user.id
+    });
+
+    const membership = await repository.createMembership({
+        workspaceId: workspace.id,
+        userId: user.id,
+        status: "active",
+        isOwner: true
+    });
+
+    return {
         workspace: mapWorkspace({
             ...workspace,
             membership_status: membership.status,
@@ -104,6 +146,7 @@ async function bootstrapPersonalWorkspaces(options = {}) {
 
 module.exports = {
     ensurePersonalWorkspaceForUser,
+    createOwnedWorkspaceForUser,
     listWorkspacesForUser,
     resolveWorkspaceRecordForUser,
     resolveWorkspaceForUser,

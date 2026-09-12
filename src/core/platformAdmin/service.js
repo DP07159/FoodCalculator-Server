@@ -145,6 +145,9 @@ async function addUserMembership({ publicId, workspacePublicId, roleCode, actorU
 
     const workspace = await repository.findWorkspaceByPublicId(workspacePublicId);
     if (!workspace) return { error: "Workspace wurde nicht gefunden." };
+    if (workspace.workspace_type === "personal" && Number(workspace.owner_user_id) !== Number(user.id)) {
+        return { error: "Persönliche Workspaces können nicht anderen Benutzern zugewiesen werden." };
+    }
 
     const code = normalizeCode(roleCode || "standard_user");
     const catalog = await repository.listCatalog();
@@ -164,6 +167,41 @@ async function addUserMembership({ publicId, workspacePublicId, roleCode, actorU
         actorEmail: actorUser.email
     });
     if (roleResult?.error) return { error: roleResult.error };
+
+    return { value: await getUserDetail(publicId) };
+}
+
+async function createUserWorkspace({ publicId, name, workspaceType, actorUser }) {
+    const user = await repository.findUserByPublicId(publicId);
+    if (!user) return { notFound: true };
+
+    const normalizedName = String(name || "").replace(/\s+/g, " ").trim();
+    if (!normalizedName) return { error: "Workspace-Name ist erforderlich." };
+    if (normalizedName.length > 120) return { error: "Workspace-Name ist zu lang." };
+
+    const normalizedType = normalizeCode(workspaceType || "family");
+    if (!["family", "practice", "restaurant", "organization"].includes(normalizedType)) {
+        return { error: "Workspace-Typ ist ungültig." };
+    }
+
+    await database.run("BEGIN");
+    try {
+        const created = await workspaceService.createOwnedWorkspaceForUser(user, {
+            name: normalizedName,
+            workspaceType: normalizedType
+        });
+
+        await authorizationService.assignRoleWithDefaults({
+            membershipId: created.membership.id,
+            roleCode: "tenant_admin",
+            assignedByUserId: actorUser.id
+        });
+
+        await database.run("COMMIT");
+    } catch (error) {
+        await database.run("ROLLBACK").catch(() => {});
+        throw error;
+    }
 
     return { value: await getUserDetail(publicId) };
 }
@@ -332,6 +370,8 @@ async function updateManagedUserProfile(publicId, payload = {}) {
     }
 
     await identityRepository.updateUserProfile(user.id, { email, displayName });
+    const updatedUser = await repository.findUserByPublicId(publicId);
+    await workspaceService.ensurePersonalWorkspaceForUser(updatedUser);
     return { value: await getUserDetail(publicId) };
 }
 
@@ -543,5 +583,6 @@ module.exports = {
     createManagedUser,
     listWorkspaces,
     addUserMembership,
+    createUserWorkspace,
     removeUserMembership
 };

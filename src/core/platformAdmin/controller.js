@@ -38,6 +38,23 @@ async function addMembership(req, res) {
     }
 }
 
+async function createWorkspace(req, res) {
+    try {
+        const result = await service.createUserWorkspace({
+            publicId: req.params.publicId,
+            name: req.body?.name,
+            workspaceType: req.body?.workspace_type,
+            actorUser: req.auth.user
+        });
+        if (result.notFound) return res.status(404).json({ error: "Benutzer wurde nicht gefunden." });
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.status(201).json(result.value);
+    } catch (error) {
+        console.error("Fehler beim Erstellen eines Workspace:", error.message);
+        res.status(500).json({ error: "Workspace konnte nicht erstellt werden." });
+    }
+}
+
 async function removeMembership(req, res) {
     try {
         const result = await service.removeUserMembership({
@@ -232,5 +249,6 @@ module.exports = {
     createUser,
     listWorkspaces,
     addMembership,
+    createWorkspace,
     removeMembership
 };

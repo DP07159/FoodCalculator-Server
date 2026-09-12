@@ -19,6 +19,7 @@ router.patch("/users/:publicId/status", controller.patchUserStatus);
 router.post("/users/:publicId/revoke-sessions", controller.revokeSessions);
 router.get("/workspaces", controller.listWorkspaces);
 router.post("/users/:publicId/memberships", controller.addMembership);
+router.post("/users/:publicId/workspaces", controller.createWorkspace);
 router.delete("/users/:publicId/memberships/:membershipId", controller.removeMembership);
 
 router.get("/catalog", controller.getCatalog);

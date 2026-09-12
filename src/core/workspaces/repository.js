@@ -33,6 +33,19 @@ async function createWorkspace({
     return get(`SELECT * FROM workspaces WHERE id = ?`, [result.lastID]);
 }
 
+
+async function updateWorkspaceName(workspaceId, name) {
+    await run(
+        `UPDATE workspaces
+         SET name = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [name, workspaceId]
+    );
+
+    return get(`SELECT * FROM workspaces WHERE id = ?`, [workspaceId]);
+}
+
 async function createMembership({
     workspaceId,
     userId,
@@ -134,6 +147,7 @@ async function listActiveUsers() {
 module.exports = {
     findPersonalWorkspaceByOwnerUserId,
     createWorkspace,
+    updateWorkspaceName,
     createMembership,
     listActiveWorkspacesForUser,
     findActiveWorkspaceForUserByPublicId,
