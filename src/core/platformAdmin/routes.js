@@ -22,6 +22,9 @@ router.post("/users/:publicId/memberships", controller.addMembership);
 router.post("/users/:publicId/workspaces", controller.createWorkspace);
 router.delete("/users/:publicId/memberships/:membershipId", controller.removeMembership);
 
+router.get("/recipe-releases", controller.listRecipeReleases);
+router.put("/recipe-releases/:recipeId", controller.putRecipeRelease);
+
 router.get("/catalog", controller.getCatalog);
 
 router.put(

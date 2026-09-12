@@ -1,4 +1,5 @@
 const service = require("./service");
+const recipeReleaseService = require("./recipeReleaseService");
 
 
 async function createUser(req, res) {
@@ -235,7 +236,39 @@ async function setModule(req, res) {
     }
 }
 
+
+async function listRecipeReleases(req, res) {
+    try {
+        res.json(await recipeReleaseService.listReleases());
+    } catch (error) {
+        console.error("Fehler bei GET /platform-admin/recipe-releases:", error.message);
+        res.status(500).json({ error: "Rezeptfreigaben konnten nicht geladen werden." });
+    }
+}
+
+async function putRecipeRelease(req, res) {
+    try {
+        const result = await recipeReleaseService.setRelease({
+            recipeId: req.params.recipeId,
+            mode: req.body?.mode,
+            workspacePublicIds: req.body?.workspace_public_ids,
+            actorUser: req.auth.user
+        });
+        if (result.notFound) {
+            return res.status(404).json({ error: "Rezept nicht gefunden." });
+        }
+        if (result.error) {
+            return res.status(400).json({ error: result.error });
+        }
+        res.json(result.value);
+    } catch (error) {
+        console.error("Fehler bei PUT /platform-admin/recipe-releases/:recipeId:", error.message);
+        res.status(500).json({ error: "Rezeptfreigabe konnte nicht gespeichert werden." });
+    }
+}
 module.exports = {
+    listRecipeReleases,
+    putRecipeRelease,
     listUsers,
     getUser,
     patchUserProfile,

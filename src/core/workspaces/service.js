@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const repository = require("./repository");
 const { mapWorkspace, mapMembership } = require("./mapper");
 const { normalizeWorkspaceName } = require("./validator");
+const recipeReleaseRepository = require("../platformAdmin/recipeReleaseRepository");
 
 async function ensurePersonalWorkspaceForUser(user, options = {}) {
     if (!user?.id) {
@@ -23,6 +24,7 @@ async function ensurePersonalWorkspaceForUser(user, options = {}) {
             workspaceType: "personal",
             ownerUserId: user.id
         });
+        await recipeReleaseRepository.syncGlobalReleasesToWorkspace(workspace.id);
 
         created = true;
     } else if (workspace.name !== personalName) {
@@ -68,6 +70,7 @@ async function createOwnedWorkspaceForUser(user, options = {}) {
         workspaceType,
         ownerUserId: user.id
     });
+    await recipeReleaseRepository.syncGlobalReleasesToWorkspace(workspace.id);
 
     const membership = await repository.createMembership({
         workspaceId: workspace.id,
