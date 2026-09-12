@@ -78,6 +78,31 @@ async function getUser(req, res) {
     }
 }
 
+
+async function patchUserProfile(req, res) {
+    try {
+        const result = await service.updateManagedUserProfile(req.params.publicId, req.body || {});
+        if (result.notFound) return res.status(404).json({ error: "Benutzer wurde nicht gefunden." });
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.json(result.value);
+    } catch (error) {
+        console.error("Fehler bei PATCH User-Profil:", error.message);
+        res.status(500).json({ error: "Benutzerdaten konnten nicht geändert werden." });
+    }
+}
+
+async function putUserPassword(req, res) {
+    try {
+        const result = await service.setManagedUserPassword(req.params.publicId, req.body?.password);
+        if (result.notFound) return res.status(404).json({ error: "Benutzer wurde nicht gefunden." });
+        if (result.error) return res.status(400).json({ error: result.error });
+        res.json(result.value);
+    } catch (error) {
+        console.error("Fehler bei PUT User-Passwort:", error.message);
+        res.status(500).json({ error: "Passwort konnte nicht geändert werden." });
+    }
+}
+
 async function patchUserStatus(req, res) {
     try {
         const result = await service.setUserStatus(
@@ -196,6 +221,8 @@ async function setModule(req, res) {
 module.exports = {
     listUsers,
     getUser,
+    patchUserProfile,
+    putUserPassword,
     patchUserStatus,
     revokeSessions,
     getCatalog,

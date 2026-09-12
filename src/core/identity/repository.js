@@ -59,6 +59,15 @@ function listUsersForAdministration() {
     );
 }
 
+function updateUserProfile(userId, { email, displayName }) {
+    return run(
+        `UPDATE users
+         SET email = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND deleted_at IS NULL`,
+        [email, displayName, userId]
+    );
+}
+
 function updateUserStatus(userId, status) {
     return run(
         `UPDATE users
@@ -223,6 +232,7 @@ module.exports = {
     createUser,
     listUsersForAdministration,
     updateUserStatus,
+    updateUserProfile,
     findCredential,
     createPasswordCredential,
     updatePasswordCredential,

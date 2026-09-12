@@ -13,6 +13,8 @@ router.use(requirePlatformAdminAfterAuthentication);
 router.get("/users", controller.listUsers);
 router.post("/users", controller.createUser);
 router.get("/users/:publicId", controller.getUser);
+router.patch("/users/:publicId/profile", controller.patchUserProfile);
+router.put("/users/:publicId/password", controller.putUserPassword);
 router.patch("/users/:publicId/status", controller.patchUserStatus);
 router.post("/users/:publicId/revoke-sessions", controller.revokeSessions);
 router.get("/workspaces", controller.listWorkspaces);

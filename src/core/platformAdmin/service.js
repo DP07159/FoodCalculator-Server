@@ -5,6 +5,7 @@ const identityService = require("../identity/service");
 const authorizationService = require("../authorization/service");
 const authorizationRepository = require("../authorization/repository");
 const accessManagementService = require("../authorization/accessManagementService");
+const workspaceService = require("../workspaces/service");
 const moduleAccessRepository = require("./moduleAccessRepository");
 const repository = require("./repository");
 const {
@@ -71,6 +72,16 @@ async function createManagedUser(payload = {}, actorUser) {
         });
         await identityRepository.createPasswordCredential(user.id, passwordHash);
 
+        // Every account owns a private personal workspace from the moment it is created.
+        // This mirrors the normal provisioning path and prevents admin-created users
+        // from depending on a pre-existing shared workspace.
+        const personalWorkspace = await workspaceService.ensurePersonalWorkspaceForUser(user);
+        await authorizationService.assignRoleWithDefaults({
+            membershipId: personalWorkspace.membership.id,
+            roleCode: "tenant_admin",
+            assignedByUserId: actorUser.id
+        });
+
         if (platformRole === "platform_admin") {
             const role = await repository.findPlatformAdminRole();
             await repository.grantPlatformAdmin({
@@ -104,6 +115,7 @@ async function createManagedUser(payload = {}, actorUser) {
                     is_platform_admin: platformRole === "platform_admin"
                 },
                 setup_password: setupPassword,
+                personal_workspace: personalWorkspace.workspace,
                 workspace_assignments: assignments.length
             }
         };
@@ -301,6 +313,58 @@ async function getUserDetail(publicId) {
     };
 }
 
+
+async function updateManagedUserProfile(publicId, payload = {}) {
+    const user = await repository.findUserByPublicId(publicId);
+    if (!user) return { notFound: true };
+
+    const email = normalizeEmail(payload.email);
+    const displayName = String(payload.display_name || "").replace(/\s+/g, " ").trim();
+
+    const emailError = validateEmail(email);
+    if (emailError) return { error: emailError };
+    if (!displayName) return { error: "Name ist erforderlich." };
+    if (displayName.length > 120) return { error: "Name ist zu lang." };
+
+    const other = await identityRepository.findUserByEmail(email);
+    if (other && Number(other.id) !== Number(user.id)) {
+        return { error: "Für diese E-Mail-Adresse existiert bereits ein Benutzer." };
+    }
+
+    await identityRepository.updateUserProfile(user.id, { email, displayName });
+    return { value: await getUserDetail(publicId) };
+}
+
+async function setManagedUserPassword(publicId, passwordValue) {
+    const user = await repository.findUserByPublicId(publicId);
+    if (!user) return { notFound: true };
+
+    const password = String(passwordValue || "");
+    if (password.length < 12) {
+        return { error: "Das neue Passwort muss mindestens 12 Zeichen lang sein." };
+    }
+    if (password.length > 256) {
+        return { error: "Das neue Passwort ist zu lang." };
+    }
+
+    const passwordHash = await identityService.hashPassword(password);
+    const credential = await identityRepository.findCredential(user.id);
+    if (credential) {
+        await identityRepository.updatePasswordCredential(credential.id, passwordHash);
+    } else {
+        await identityRepository.createPasswordCredential(user.id, passwordHash);
+    }
+    const revokeResult = await identityRepository.revokeAllSessions(user.id);
+
+    return {
+        value: {
+            public_id: user.public_id,
+            password_changed: true,
+            sessions_revoked: Number(revokeResult?.changes) || 0
+        }
+    };
+}
+
 async function setUserStatus(publicId, statusValue) {
     const validation = validateUserStatus(statusValue);
     if (validation.error) return validation;
@@ -469,6 +533,8 @@ module.exports = {
     listUsers,
     getUserDetail,
     setUserStatus,
+    updateManagedUserProfile,
+    setManagedUserPassword,
     revokeUserSessions,
     getCatalog,
     setMembershipRole,
